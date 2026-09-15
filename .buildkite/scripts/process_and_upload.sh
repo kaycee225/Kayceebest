@@ -228,13 +228,15 @@ import subprocess
 import requests
 
 GOFILE_TOKEN = os.environ.get("GOFILE_TOKEN", "VoTnBsgTAiTqm97X6FmvdmBswsMPl6SG")
-ROOT_FOLDER_ID = os.environ.get("ROOT_FOLDER_ID", "6af360d4-d348-470b-8d25-40e961cb9565")
+ROOT_FOLDER_ID = os.environ.get("ROOT_FOLDER_ID", "51130d09-efd5-48a9-97e4-35e2c21a6cde")
 FOLDER_PATH = 'downloads'
 
 summary_links = []
+headers = {"Authorization": f"Bearer {GOFILE_TOKEN}"} if GOFILE_TOKEN else {}
 
+# 1. Retrieve active upload server
 try:
-    srv_res = requests.get("https://api.gofile.io/servers", timeout=10).json()
+    srv_res = requests.get("https://api.gofile.io/servers", headers=headers, timeout=10).json()
     if srv_res.get("status") == "ok" and srv_res['data']['servers']:
         SERVER = srv_res['data']['servers'][0]['name']
     else:
@@ -246,10 +248,8 @@ except Exception as e:
 def create_gofile_folder(parent_id, folder_name):
     url = "https://api.gofile.io/contents/createFolder"
     payload = {"parentFolderId": parent_id, "folderName": folder_name}
-    if GOFILE_TOKEN:
-        payload["token"] = GOFILE_TOKEN
     try:
-        res = requests.post(url, json=payload, timeout=15)
+        res = requests.post(url, json=payload, headers=headers, timeout=15)
         data = res.json()
         if data.get("status") == "ok":
             return data['data']['id'], data['data'].get('downloadPage')
@@ -260,19 +260,17 @@ def create_gofile_folder(parent_id, folder_name):
 def upload_to_gofile(file_path, folder_id=None):
     url = f"https://{SERVER}.gofile.io/contents/uploadfile"
     data = {}
-    if GOFILE_TOKEN:
-        data['token'] = GOFILE_TOKEN
     if folder_id:
         data['folderId'] = folder_id
 
     try:
         with open(file_path, 'rb') as f:
             files = {'file': f}
-            res = requests.post(url, data=data, files=files, timeout=3600)
+            res = requests.post(url, data=data, files=files, headers=headers, timeout=3600)
             return res.json()
     except json.decoder.JSONDecodeError:
-        print(f"❌ Server returned invalid non-JSON response (HTTP {res.status_code}): {res.text[:150]}")
-        return {"status": "error", "error": "Invalid JSON response"}
+        print(f"❌ Server returned invalid response (HTTP {res.status_code}): {res.text[:150]}")
+        return {"status": "error", "error": f"HTTP {res.status_code}"}
     except requests.exceptions.RequestException as e:
         print(f"❌ Network/Request error during upload: {e}")
         return {"status": "error", "error": str(e)}
@@ -323,7 +321,6 @@ if os.path.exists(FOLDER_PATH):
                 print(f"🔗 File Link: {url}")
                 summary_links.append(f"* **{item}**: {url}")
 
-# Safe annotation call with error suppression so it never breaks pipeline exit status
 if summary_links:
     markdown_body = "### 📦 Generated Gofile Links\n\n" + "\n".join(summary_links)
     try:
