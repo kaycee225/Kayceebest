@@ -227,8 +227,9 @@ import json
 import subprocess
 import requests
 
-GOFILE_TOKEN = os.environ.get("GOFILE_TOKEN", "VoTnBsgTAiTqm97X6FmvdmBswsMPl6SG")
-ROOT_FOLDER_ID = os.environ.get("ROOT_FOLDER_ID", "51130d09-efd5-48a9-97e4-35e2c21a6cde")
+# Set your hardcoded credentials directly here
+GOFILE_TOKEN = "VoTnBsgTAiTqm97X6FmvdmBswsMPl6SG"
+ROOT_FOLDER_ID = "6af360d4-d348-470b-8d25-40e961cb9565"  # Change this to your folder ID
 FOLDER_PATH = 'downloads'
 
 summary_links = []
