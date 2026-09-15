@@ -23,7 +23,7 @@ import os
 import requests
 from magnet2torrent import Magnet2Torrent, FailedToFetchException
 
-link_url = "https://pink-script-snap.lovable.app/api/public/page/0e01cfaf-128c-477f-bff1-9dee23822d97.txt"
+link_url = "https://pink-script-snap.lovable.app/api/public/page/e625b079-9246-4bd1-9626-c7c2fe3142a0.txt"
 
 async def main():
     try:
