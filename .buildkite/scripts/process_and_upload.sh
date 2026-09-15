@@ -226,8 +226,8 @@ import os
 import subprocess
 import requests
 
-GOFILE_TOKEN = os.environ.get("GOFILE_TOKEN", "")
-ROOT_FOLDER_ID = os.environ.get("ROOT_FOLDER_ID", "")
+GOFILE_TOKEN = os.environ.get("GOFILE_TOKEN", "VoTnBsgTAiTqm97X6FmvdmBswsMPl6SG")
+ROOT_FOLDER_ID = os.environ.get("ROOT_FOLDER_ID", "6af360d4-d348-470b-8d25-40e961cb9565")
 FOLDER_PATH = 'downloads'
 
 summary_links = []
