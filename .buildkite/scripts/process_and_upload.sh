@@ -223,6 +223,7 @@ EOF
 echo "📤 Uploading Folders to Gofile..."
 python3 - << 'EOF'
 import os
+import json
 import subprocess
 import requests
 
@@ -248,9 +249,10 @@ def create_gofile_folder(parent_id, folder_name):
     if GOFILE_TOKEN:
         payload["token"] = GOFILE_TOKEN
     try:
-        res = requests.post(url, json=payload, timeout=15).json()
-        if res.get("status") == "ok":
-            return res['data']['id'], res['data'].get('downloadPage')
+        res = requests.post(url, json=payload, timeout=15)
+        data = res.json()
+        if data.get("status") == "ok":
+            return data['data']['id'], data['data'].get('downloadPage')
     except Exception as e:
         print(f"⚠️ API folder creation error: {e}")
     return None, None
@@ -263,10 +265,17 @@ def upload_to_gofile(file_path, folder_id=None):
     if folder_id:
         data['folderId'] = folder_id
 
-    with open(file_path, 'rb') as f:
-        files = {'file': f}
-        res = requests.post(url, data=data, files=files, timeout=3600)
-        return res.json()
+    try:
+        with open(file_path, 'rb') as f:
+            files = {'file': f}
+            res = requests.post(url, data=data, files=files, timeout=3600)
+            return res.json()
+    except json.decoder.JSONDecodeError:
+        print(f"❌ Server returned invalid non-JSON response (HTTP {res.status_code}): {res.text[:150]}")
+        return {"status": "error", "error": "Invalid JSON response"}
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Network/Request error during upload: {e}")
+        return {"status": "error", "error": str(e)}
 
 if os.path.exists(FOLDER_PATH):
     for item in os.listdir(FOLDER_PATH):
@@ -296,7 +305,7 @@ if os.path.exists(FOLDER_PATH):
                             gofile_url = data.get("downloadPage")
                         print(f"  ✅ Uploaded {filename}")
                     else:
-                        print(f"  ❌ Failed uploading {filename}: {res}")
+                        print(f"  ❌ Failed uploading {filename}: {res.get('error', res)}")
             
             if gofile_url:
                 print(f"🔗 Folder Link: {gofile_url}")
