@@ -4,7 +4,7 @@ name: Download Torrent and Upload to Filemirage
 
 agent:
   machine:
-    type: f1-standard-2
+    type: f1-standard-4
     os_image: ubuntu2204
 
 blocks:
@@ -17,9 +17,9 @@ blocks:
           commands:
             - checkout
             - echo "📦 Installing dependencies (7-zip, aria2, Python3)..."
-            - sudo apt update
-            - sudo apt install -y p7zip-full aria2 python3 python3-requests python3-pip curl
-            - pip3 install --break-system-packages magnet2torrent requests
+            - sudo apt update -qq
+            - sudo apt install -y -qq p7zip-full aria2 python3 python3-requests python3-pip curl
+            - pip3 install --no-cache-dir --break-system-packages magnet2torrent requests
             
             - echo "🧲 Processing links (Converting magnets & Queuing direct links)..."
             - mkdir -p downloads torrents 
@@ -58,7 +58,6 @@ blocks:
                                       print(f"❌ Failed to fetch metadata for magnet link.")
                               elif link.startswith('http'):
                                   if link.endswith('.torrent'):
-                                      # Download actual .torrent file
                                       tor_data = requests.get(link).content
                                       parsed = urlparse(link)
                                       filename = os.path.basename(parsed.path) or f"download_{i}.torrent"
@@ -66,7 +65,6 @@ blocks:
                                           tf.write(tor_data)
                                       print(f"✅ Downloaded .torrent file: {filename}")
                                   else:
-                                      # Treat as a direct regular download
                                       direct_links.append(link)
                                       print(f"🔗 Queued direct HTTP download: {link}")
                                       
@@ -80,7 +78,7 @@ blocks:
               asyncio.run(main())
               EOF
 
-            - echo "🚀 Starting concurrent aria2c downloads with updated trackers and timeout protection..."
+            - echo "🚀 Starting max-speed concurrent aria2c downloads..."
             - |
               python3 -u - << 'EOF'
               import os
@@ -90,7 +88,6 @@ blocks:
               import time
               import requests
 
-              # Fetch dynamic best trackers list
               def get_best_trackers():
                   fallback_trackers = [
                       "udp://tracker.openbittorrent.com:80/announce",
@@ -110,7 +107,7 @@ blocks:
                       if res.status_code == 200:
                           fetched = [line.strip() for line in res.text.splitlines() if line.strip()]
                           if fetched:
-                              print(f"📡 Successfully loaded {len(fetched)} live trackers from GitHub.", flush=True)
+                              print(f"📡 Successfully loaded {len(fetched)} live trackers.", flush=True)
                               return ",".join(fetched)
                   except Exception as e:
                       print(f"⚠️ Tracker fetch failed ({e}). Using fallback tracker list.", flush=True)
@@ -132,8 +129,13 @@ blocks:
                               "--enable-dht=true",
                               "--enable-peer-exchange=true",
                               "--follow-torrent=mem",
-                              "--bt-max-peers=100",
+                              "-s16",
+                              "-x16",
+                              "--min-split-size=1M",
                               "--max-connection-per-server=16",
+                              "--bt-max-peers=128",
+                              "--bt-tracker-connect-timeout=5",
+                              "--bt-tracker-timeout=5",
                               f"--bt-tracker={LIVE_TRACKERS}",
                               target
                           ]
@@ -156,7 +158,6 @@ blocks:
                                   line_str = line.decode('utf-8', errors='ignore').strip()
                                   
                                   if line_str:
-                                      # Detect if downloaded bytes > 0 from aria2 output summary
                                       if not download_started:
                                           match = re.search(r'\[#\w+\s+([0-9\.]+)([KMGTP]?i?B)/', line_str)
                                           if match:
@@ -165,14 +166,12 @@ blocks:
                                                   download_started = True
                                                   print(f"🚀 Download started active transfer for: {os.path.basename(target)}", flush=True)
                                       
-                                      # Print progress every 30 seconds
                                       if line_str.startswith('[#'):
                                           current_time = time.time()
                                           if current_time - last_print_time >= 30:
                                               print(f"📊 Download Progress [{os.path.basename(target)[:30]}]: {line_str}", flush=True)
                                               last_print_time = current_time
                                   
-                                  # Enforce timeout ONLY if download hasn't started yet
                                   elapsed = time.time() - start_time
                                   if not download_started and elapsed > stuck_timeout:
                                       print(f"⏱️ Stuck at 0% for {stuck_timeout}s. Terminating attempt {attempt}...", flush=True)
@@ -225,7 +224,7 @@ blocks:
                       return
 
                   os.makedirs("downloads", exist_ok=True)
-                  sem = asyncio.Semaphore(8)
+                  sem = asyncio.Semaphore(16)
                   tasks = [download_target(t, sem) for t in targets]
                   results = await asyncio.gather(*tasks)
                   finished = [r for r in results if r]
@@ -240,7 +239,7 @@ blocks:
               asyncio.run(main())
               EOF
 
-            - echo "📦 Running Smart Auto-Group Zipping & Splitting..."
+            - echo "📦 Running Multi-Threaded Smart Auto-Group Zipping & Splitting..."
             - |
               python3 - << 'EOF'
               import os, shutil, subprocess, re
@@ -275,7 +274,7 @@ blocks:
                   zip_name = f"{group_name}.zip"
                   orig = os.getcwd()
                   os.chdir(base_dir)
-                  cmd = ["7z", "a", "-mx0", zip_name, group_name]
+                  cmd = ["7z", "a", "-mx0", "-mmt=on", zip_name, group_name]
                   if folder_size > max_bytes_limit:
                       cmd.insert(2, "-v5900m")
                   subprocess.run(cmd, check=True)
@@ -296,7 +295,7 @@ blocks:
                               orig = os.getcwd()
                               os.chdir(folder)
                               zip_name = f"{item}.zip"
-                              cmd = ["7z", "a", "-mx0", zip_name, item]
+                              cmd = ["7z", "a", "-mx0", "-mmt=on", zip_name, item]
                               if folder_size > max_bytes:
                                   cmd.insert(2, "-v5900m")
                               subprocess.run(cmd, check=True)
@@ -351,7 +350,7 @@ blocks:
                   shutil.rmtree(r, ignore_errors=True)
               EOF
 
-            - echo "📤 Uploading files to Filemirage via Memory-Safe Curl..."
+            - echo "📤 Running Parallel Multi-Threaded Uploads to Filemirage..."
             - |
               python3 - << 'EOF'
               import os
@@ -359,6 +358,7 @@ blocks:
               import requests
               import time
               import fcntl
+              from concurrent.futures import ThreadPoolExecutor
 
               FILEMIRAGE_API_TOKEN = '9QQH-DGES-CWQZ-FXNV'
               FOLDER_PATH = 'downloads'
@@ -370,54 +370,62 @@ blocks:
                   print(f"Failed to fetch Filemirage server: {e}")
                   exit(1)
 
+              def upload_single_file(file_path):
+                  filename = os.path.basename(file_path)
+                  file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                  print(f"⬆️ [START] Uploading: {filename} ({file_size_mb:.2f} MB)", flush=True)
+                  
+                  curl_cmd = [
+                      "curl", "-X", "POST",
+                      f"{SERVER}/upload.php",
+                      "-H", f"Authorization: Bearer {FILEMIRAGE_API_TOKEN}",
+                      "-F", f"file=@{file_path}",
+                      "--max-time", "3600"
+                  ]
+                  
+                  proc = subprocess.Popen(curl_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                  
+                  fd = proc.stderr.fileno()
+                  fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+                  fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+                  
+                  last_print_time = time.time()
+                  buffer = b""
+                  
+                  while proc.poll() is None:
+                      try:
+                          chunk = proc.stderr.read(1024)
+                          if chunk:
+                              buffer += chunk
+                              if b'\r' in buffer or b'\n' in buffer:
+                                  lines = buffer.replace(b'\r', b'\n').split(b'\n')
+                                  buffer = lines[-1]
+                                  valid_lines = [L.decode('utf-8', errors='ignore').strip() for L in lines[:-1] if L.strip()]
+                                  if valid_lines:
+                                      last_line = valid_lines[-1]
+                                      if time.time() - last_print_time >= 30:
+                                          print(f"📤 Progress [{filename[:25]}]: {last_line}", flush=True)
+                                          last_print_time = time.time()
+                      except Exception:
+                          pass
+                      time.sleep(0.5)
+                      
+                  stdout, stderr = proc.communicate()
+                  if proc.returncode == 0:
+                      print(f"✅ Finished uploading {filename}: {stdout.decode('utf-8', errors='ignore').strip()}", flush=True)
+                  else:
+                      err_msg = stderr.decode('utf-8', errors='ignore').strip() if stderr else 'Unknown error'
+                      print(f"❌ Curl Error uploading {filename}: {err_msg}", flush=True)
+
               if os.path.exists(FOLDER_PATH):
+                  upload_queue = []
                   for root, dirs, files in os.walk(FOLDER_PATH):
                       for filename in files:
-                          if ".!qB" in filename or ".part" in filename or ".aria2" in filename:
-                              continue
-                          file_path = os.path.join(root, filename)
-                          file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                          print(f"⬆️ Uploading: {filename} ({file_size_mb:.2f} MB)")
-                          
-                          curl_cmd = [
-                              "curl", "-X", "POST",
-                              f"{SERVER}/upload.php",
-                              "-H", f"Authorization: Bearer {FILEMIRAGE_API_TOKEN}",
-                              "-F", f"file=@{file_path}",
-                              "--max-time", "3600"
-                          ]
-                          
-                          proc = subprocess.Popen(curl_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                          
-                          fd = proc.stderr.fileno()
-                          fl = fcntl.fcntl(fd, fcntl.F_GETFL)
-                          fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
-                          
-                          last_print_time = time.time()
-                          buffer = b""
-                          
-                          while proc.poll() is None:
-                              try:
-                                  chunk = proc.stderr.read(1024)
-                                  if chunk:
-                                      buffer += chunk
-                                      if b'\r' in buffer or b'\n' in buffer:
-                                          lines = buffer.replace(b'\r', b'\n').split(b'\n')
-                                          buffer = lines[-1]
-                                          valid_lines = [L.decode('utf-8', errors='ignore').strip() for L in lines[:-1] if L.strip()]
-                                          if valid_lines:
-                                              last_line = valid_lines[-1]
-                                              if time.time() - last_print_time >= 30:
-                                                  print(f"📤 Upload Progress [{filename[:30]}]: {last_line}", flush=True)
-                                                  last_print_time = time.time()
-                              except Exception:
-                                  pass
-                              time.sleep(0.5)
-                              
-                          stdout, stderr = proc.communicate()
-                          if proc.returncode == 0:
-                              print(f"✅ Response for {filename}: {stdout.decode('utf-8', errors='ignore').strip()}")
-                          else:
-                              err_msg = stderr.decode('utf-8', errors='ignore').strip() if stderr else 'Unknown error'
-                              print(f"❌ Curl Error uploading {filename}: {err_msg}")
+                          if not any(ext in filename for ext in [".!qB", ".part", ".aria2"]):
+                              upload_queue.append(os.path.join(root, filename))
+                  
+                  if upload_queue:
+                      print(f"🚀 Launching 4 parallel upload workers for {len(upload_queue)} files...", flush=True)
+                      with ThreadPoolExecutor(max_workers=4) as executor:
+                          executor.map(upload_single_file, upload_queue)
               EOF
