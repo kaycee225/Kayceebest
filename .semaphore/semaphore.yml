@@ -4,7 +4,7 @@ name: Download Torrent and Upload to Filemirage
 
 agent:
   machine:
-    type: f1-standard-4
+    type: f1-standard-2
     os_image: ubuntu2204
 
 blocks:
@@ -29,7 +29,7 @@ blocks:
               import os
               import requests
               from urllib.parse import urlparse
-              from magnet2torrent import Magnet2Torrent, FailedToFetchException
+              from magnet2torrent import Magnet2Torrent
 
               link_url = "https://pink-script-snap.lovable.app/api/public/page/0e01cfaf-128c-477f-bff1-9dee23822d97.txt"
 
@@ -46,24 +46,28 @@ blocks:
                           link = link.strip()
                           if link and not link.startswith('#') and not link.endswith(' NO'):
                               if link.startswith('magnet:'):
-                                  print(f"📥 Converting magnet: {link[:50]}...", flush=True)
+                                  print(f"📥 Converting magnet: {link[:60]}...", flush=True)
                                   try:
                                       m2t = Magnet2Torrent(link)
-                                      filename, torrent_data = await m2t.retrieve_torrent()
+                                      filename, torrent_data = await asyncio.wait_for(m2t.retrieve_torrent(), timeout=30)
                                       torrent_path = os.path.join("torrents", f"{filename}.torrent")
                                       with open(torrent_path, "wb") as f:
                                           f.write(torrent_data)
                                       print(f"✅ Saved torrent: {torrent_path}")
-                                  except FailedToFetchException:
-                                      print(f"❌ Failed to fetch metadata for magnet link.")
+                                  except Exception as e:
+                                      print(f"⚠️ Magnet conversion failed ({e}). Queuing raw magnet for aria2c fallback!", flush=True)
+                                      direct_links.append(link)
                               elif link.startswith('http'):
                                   if link.endswith('.torrent'):
-                                      tor_data = requests.get(link).content
-                                      parsed = urlparse(link)
-                                      filename = os.path.basename(parsed.path) or f"download_{i}.torrent"
-                                      with open(os.path.join('torrents', filename), 'wb') as tf:
-                                          tf.write(tor_data)
-                                      print(f"✅ Downloaded .torrent file: {filename}")
+                                      try:
+                                          tor_data = requests.get(link, timeout=15).content
+                                          parsed = urlparse(link)
+                                          filename = os.path.basename(parsed.path) or f"download_{i}.torrent"
+                                          with open(os.path.join('torrents', filename), 'wb') as tf:
+                                              tf.write(tor_data)
+                                          print(f"✅ Downloaded .torrent file: {filename}")
+                                      except Exception as e:
+                                          print(f"❌ Failed to download torrent file ({e}): {link}")
                                   else:
                                       direct_links.append(link)
                                       print(f"🔗 Queued direct HTTP download: {link}")
@@ -308,45 +312,43 @@ blocks:
                       if f.lower().endswith(video_ext):
                           all_videos.append(os.path.join(r, f))
 
-              series_regex = re.compile(r'(?i)^(.*?)[.\s_-]+S(\d{1,2})(?:[EX\-]|\b)')
-              def clean_series_name(raw_name):
-                  return re.sub(r'(?i)(www\.[^\s]+\s*-\s*|^\[.*?\]\s*)', '', raw_name).strip('. -_')
-
+              series_regex = re.compile(r'(?i)(?:^(.*?)[.\s_-]+)?S(\d{1,2})(?:[EX\-]|\b)')
+              
               series_groups = defaultdict(list)
-              remaining_tv_videos = []
+              unmatched_videos = []
 
               for vid_path in all_videos:
                   vid_name = os.path.basename(vid_path)
                   parent_name = os.path.basename(os.path.dirname(vid_path))
                   match = series_regex.search(vid_name) or series_regex.search(parent_name)
+                  
                   if match:
-                      s_name = clean_series_name(match.group(1))
+                      raw_title = match.group(1) or "Season"
                       s_num = match.group(2)
-                      group_key = f"{s_name.lower()}_S{s_num}"
+                      group_key = f"{raw_title.strip('. -_').lower()}_S{s_num}"
                       series_groups[group_key].append(vid_path)
-                      remaining_tv_videos.append(vid_path)
+                  else:
+                      unmatched_videos.append(vid_path)
 
               for group_key, vids in series_groups.items():
                   if len(vids) > 3:
                       first_stem = os.path.splitext(os.path.basename(vids[0]))[0]
                       create_7z_group(first_stem, vids, folder, max_bytes)
-                      for v in vids:
-                          if v in remaining_tv_videos:
-                              remaining_tv_videos.remove(v)
+                  else:
+                      unmatched_videos.extend(vids)
 
-              if len(remaining_tv_videos) > 3:
-                  first_stem = os.path.splitext(os.path.basename(remaining_tv_videos[0]))[0]
-                  create_7z_group(first_stem, remaining_tv_videos, folder, max_bytes)
-                  remaining_tv_videos.clear()
+              if len(unmatched_videos) > 3:
+                  first_stem = os.path.splitext(os.path.basename(unmatched_videos[0]))[0]
+                  create_7z_group(f"Batch_{first_stem}", unmatched_videos, folder, max_bytes)
 
               for r, dirs, files in os.walk(folder, topdown=False):
                   if r == folder: continue
                   for f in files:
                       if f.lower().endswith(media_ext):
-                        src = os.path.join(r, f)
-                        dst = os.path.join(folder, f)
-                        if not os.path.exists(dst): 
-                            shutil.move(src, dst)
+                          src = os.path.join(r, f)
+                          dst = os.path.join(folder, f)
+                          if not os.path.exists(dst): 
+                              shutil.move(src, dst)
                   shutil.rmtree(r, ignore_errors=True)
               EOF
 
