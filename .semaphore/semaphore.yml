@@ -352,36 +352,30 @@ blocks:
                   shutil.rmtree(r, ignore_errors=True)
               EOF
 
-            - echo "📤 Running Parallel Multi-Threaded Uploads to Filemirage..."
+          - echo "📤 Running Parallel Multi-Threaded Uploads to Pixeldrain..."
             - |
               python3 - << 'EOF'
               import os
               import subprocess
-              import requests
               import time
               import fcntl
               from concurrent.futures import ThreadPoolExecutor
 
-              FILEMIRAGE_API_TOKEN = '9QQH-DGES-CWQZ-FXNV'
+              # Replace with your Pixeldrain API Key (obtain from https://pixeldrain.com/user/api_keys)
+              PIXELDRAIN_API_KEY = "0bfe0b11-611d-4bb3-9b4c-36dbaa5a1fd5"
               FOLDER_PATH = 'downloads'
-
-              try:
-                  srv_res = requests.get("https://filemirage.com/api/servers", timeout=10).json()
-                  SERVER = srv_res['data']['server']
-              except Exception as e:
-                  print(f"Failed to fetch Filemirage server: {e}")
-                  exit(1)
 
               def upload_single_file(file_path):
                   filename = os.path.basename(file_path)
                   file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                  print(f"⬆️ [START] Uploading: {filename} ({file_size_mb:.2f} MB)", flush=True)
+                  print(f"⬆️ [START] Uploading to Pixeldrain: {filename} ({file_size_mb:.2f} MB)", flush=True)
                   
+                  # Pixeldrain API upload endpoint using standard PUT request
                   curl_cmd = [
-                      "curl", "-X", "POST",
-                      f"{SERVER}/upload.php",
-                      "-H", f"Authorization: Bearer {FILEMIRAGE_API_TOKEN}",
-                      "-F", f"file=@{file_path}",
+                      "curl", "-X", "PUT",
+                      "-u", f":{PIXELDRAIN_API_KEY}",
+                      "-T", file_path,
+                      f"https://pixeldrain.com/api/file/{filename}",
                       "--max-time", "3600"
                   ]
                   
