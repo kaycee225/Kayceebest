@@ -119,7 +119,7 @@ blocks:
 
               LIVE_TRACKERS = get_best_trackers()
 
-              async def download_target(target, sem, stuck_timeout=90, max_retries=3):
+              async def download_target(target, sem, stuck_timeout=20, max_retries=5):
                   async with sem:
                       for attempt in range(1, max_retries + 1):
                           print(f"📥 [Attempt {attempt}/{max_retries}] Starting: {target[:80]}", flush=True)
