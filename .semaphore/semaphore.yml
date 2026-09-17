@@ -1,6 +1,6 @@
 version: v1.0
 
-name: Download Torrent and Upload to Filemirage
+name: Download Torrent and Upload to Pixeldrain
 
 agent:
   machine:
@@ -27,11 +27,15 @@ blocks:
               python3 - << 'EOF'
               import asyncio
               import os
+              import re
               import requests
               from urllib.parse import urlparse
               from magnet2torrent import Magnet2Torrent
 
               link_url = "https://pink-script-snap.lovable.app/api/public/page/0e01cfaf-128c-477f-bff1-9dee23822d97.txt"
+
+              def sanitize_filename(name):
+                  return re.sub(r'[^\w\.\-]', '_', name)
 
               async def main():
                   try:
@@ -50,7 +54,8 @@ blocks:
                                   try:
                                       m2t = Magnet2Torrent(link)
                                       filename, torrent_data = await asyncio.wait_for(m2t.retrieve_torrent(), timeout=30)
-                                      torrent_path = os.path.join("torrents", f"{filename}.torrent")
+                                      safe_filename = sanitize_filename(filename)
+                                      torrent_path = os.path.join("torrents", f"{safe_filename}.torrent")
                                       with open(torrent_path, "wb") as f:
                                           f.write(torrent_data)
                                       print(f"✅ Saved torrent: {torrent_path}")
@@ -62,10 +67,11 @@ blocks:
                                       try:
                                           tor_data = requests.get(link, timeout=15).content
                                           parsed = urlparse(link)
-                                          filename = os.path.basename(parsed.path) or f"download_{i}.torrent"
-                                          with open(os.path.join('torrents', filename), 'wb') as tf:
+                                          raw_filename = os.path.basename(parsed.path) or f"download_{i}.torrent"
+                                          safe_filename = sanitize_filename(raw_filename)
+                                          with open(os.path.join('torrents', safe_filename), 'wb') as tf:
                                               tf.write(tor_data)
-                                          print(f"✅ Downloaded .torrent file: {filename}")
+                                          print(f"✅ Downloaded .torrent file: {safe_filename}")
                                       except Exception as e:
                                           print(f"❌ Failed to download torrent file ({e}): {link}")
                                   else:
@@ -243,7 +249,7 @@ blocks:
               asyncio.run(main())
               EOF
 
-            - echo "📦 Running Multi-Threaded Smart Auto-Group Zipping & Splitting..."
+            - echo "📦 Sanitizing file names & Running Multi-Threaded Auto-Group Zipping..."
             - |
               python3 - << 'EOF'
               import os, shutil, subprocess, re
@@ -253,6 +259,20 @@ blocks:
               video_ext = ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v')
               media_ext = video_ext + ('.srt', '.ass', '.vtt', '.sub')
               max_bytes = 10000 * 1024 * 1024
+
+              def sanitize_name(name):
+                  return re.sub(r'[^\w\.\-]', '_', name)
+
+              if os.path.exists(folder):
+                  for root, dirs, files in os.walk(folder, topdown=False):
+                      for f in files:
+                          clean = sanitize_name(f)
+                          if clean != f:
+                              os.rename(os.path.join(root, f), os.path.join(root, clean))
+                      for d in dirs:
+                          clean = sanitize_name(d)
+                          if clean != d:
+                              os.rename(os.path.join(root, d), os.path.join(root, clean))
 
               def get_dir_size(p):
                   return sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fn in os.walk(p) for f in fn)
@@ -352,7 +372,7 @@ blocks:
                   shutil.rmtree(r, ignore_errors=True)
               EOF
 
-          - echo "📤 Running Parallel Multi-Threaded Uploads to Pixeldrain..."
+            - echo "📤 Running Parallel Multi-Threaded Uploads to Pixeldrain..."
             - |
               python3 - << 'EOF'
               import os
@@ -361,21 +381,19 @@ blocks:
               import fcntl
               from concurrent.futures import ThreadPoolExecutor
 
-              # Replace with your Pixeldrain API Key (obtain from https://pixeldrain.com/user/api_keys)
               PIXELDRAIN_API_KEY = "0bfe0b11-611d-4bb3-9b4c-36dbaa5a1fd5"
               FOLDER_PATH = 'downloads'
 
               def upload_single_file(file_path):
                   filename = os.path.basename(file_path)
                   file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                  print(f"⬆️ [START] Uploading to Pixeldrain: {filename} ({file_size_mb:.2f} MB)", flush=True)
+                  print(f"⬆️ [START] Uploading: {filename} ({file_size_mb:.2f} MB)", flush=True)
                   
-                  # Pixeldrain API upload endpoint using standard PUT request
                   curl_cmd = [
-                      "curl", "-X", "PUT",
+                      "curl", "-X", "POST",
+                      "https://pixeldrain.com/api/file",
                       "-u", f":{PIXELDRAIN_API_KEY}",
-                      "-T", file_path,
-                      f"https://pixeldrain.com/api/file/{filename}",
+                      "-F", f"file=@{file_path}",
                       "--max-time", "3600"
                   ]
                   
