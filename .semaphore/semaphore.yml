@@ -27,15 +27,11 @@ blocks:
               python3 - << 'EOF'
               import asyncio
               import os
-              import re
               import requests
               from urllib.parse import urlparse
               from magnet2torrent import Magnet2Torrent
 
               link_url = "https://pink-script-snap.lovable.app/api/public/page/0e01cfaf-128c-477f-bff1-9dee23822d97.txt"
-
-              def sanitize_filename(name):
-                  return re.sub(r'[^\w\.\-]', '_', name)
 
               async def main():
                   try:
@@ -54,8 +50,7 @@ blocks:
                                   try:
                                       m2t = Magnet2Torrent(link)
                                       filename, torrent_data = await asyncio.wait_for(m2t.retrieve_torrent(), timeout=30)
-                                      safe_filename = sanitize_filename(filename)
-                                      torrent_path = os.path.join("torrents", f"{safe_filename}.torrent")
+                                      torrent_path = os.path.join("torrents", f"{filename}.torrent")
                                       with open(torrent_path, "wb") as f:
                                           f.write(torrent_data)
                                       print(f"✅ Saved torrent: {torrent_path}")
@@ -67,11 +62,10 @@ blocks:
                                       try:
                                           tor_data = requests.get(link, timeout=15).content
                                           parsed = urlparse(link)
-                                          raw_filename = os.path.basename(parsed.path) or f"download_{i}.torrent"
-                                          safe_filename = sanitize_filename(raw_filename)
-                                          with open(os.path.join('torrents', safe_filename), 'wb') as tf:
+                                          filename = os.path.basename(parsed.path) or f"download_{i}.torrent"
+                                          with open(os.path.join('torrents', filename), 'wb') as tf:
                                               tf.write(tor_data)
-                                          print(f"✅ Downloaded .torrent file: {safe_filename}")
+                                          print(f"✅ Downloaded .torrent file: {filename}")
                                       except Exception as e:
                                           print(f"❌ Failed to download torrent file ({e}): {link}")
                                   else:
@@ -125,7 +119,7 @@ blocks:
 
               LIVE_TRACKERS = get_best_trackers()
 
-              async def download_target(target, sem, stuck_timeout=90, max_retries=3):
+              async def download_target(target, sem, stuck_timeout=20, max_retries=5):
                   async with sem:
                       for attempt in range(1, max_retries + 1):
                           print(f"📥 [Attempt {attempt}/{max_retries}] Starting: {target[:80]}", flush=True)
@@ -249,7 +243,7 @@ blocks:
               asyncio.run(main())
               EOF
 
-            - echo "📦 Sanitizing file names & Running Multi-Threaded Auto-Group Zipping..."
+            - echo "📦 Running Multi-Threaded Smart Auto-Group Zipping & Splitting..."
             - |
               python3 - << 'EOF'
               import os, shutil, subprocess, re
@@ -259,20 +253,6 @@ blocks:
               video_ext = ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v')
               media_ext = video_ext + ('.srt', '.ass', '.vtt', '.sub')
               max_bytes = 10000 * 1024 * 1024
-
-              def sanitize_name(name):
-                  return re.sub(r'[^\w\.\-]', '_', name)
-
-              if os.path.exists(folder):
-                  for root, dirs, files in os.walk(folder, topdown=False):
-                      for f in files:
-                          clean = sanitize_name(f)
-                          if clean != f:
-                              os.rename(os.path.join(root, f), os.path.join(root, clean))
-                      for d in dirs:
-                          clean = sanitize_name(d)
-                          if clean != d:
-                              os.rename(os.path.join(root, d), os.path.join(root, clean))
 
               def get_dir_size(p):
                   return sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fn in os.walk(p) for f in fn)
@@ -381,21 +361,27 @@ blocks:
               import fcntl
               from concurrent.futures import ThreadPoolExecutor
 
+              # Replace with your Pixeldrain API Key, or leave empty for anonymous uploads
               PIXELDRAIN_API_KEY = "0bfe0b11-611d-4bb3-9b4c-36dbaa5a1fd5"
-              FOLDER_PATH = 'downloads'
+              FOLDER_PATH = "downloads"
+              UPLOAD_URL = "https://pixeldrain.com/api/file/"
 
               def upload_single_file(file_path):
                   filename = os.path.basename(file_path)
                   file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
                   print(f"⬆️ [START] Uploading: {filename} ({file_size_mb:.2f} MB)", flush=True)
                   
+                  # Safely structure the curl command to handle spaces and special characters natively via list argument passing
                   curl_cmd = [
-                      "curl", "-X", "POST",
-                      "https://pixeldrain.com/api/file",
-                      "-u", f":{PIXELDRAIN_API_KEY}",
+                      "curl", "-s", "-w", "\nHTTP_STATUS:%{http_code}",
+                      "-X", "POST",
+                      UPLOAD_URL,
                       "-F", f"file=@{file_path}",
                       "--max-time", "3600"
                   ]
+
+                  if PIXELDRAIN_API_KEY and PIXELDRAIN_API_KEY != "YOUR_PIXELDRAIN_API_KEY":
+                      curl_cmd.extend(["-u", f":{PIXELDRAIN_API_KEY}"])
                   
                   proc = subprocess.Popen(curl_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                   
@@ -425,8 +411,10 @@ blocks:
                       time.sleep(0.5)
                       
                   stdout, stderr = proc.communicate()
+                  output_text = stdout.decode('utf-8', errors='ignore').strip()
+                  
                   if proc.returncode == 0:
-                      print(f"✅ Finished uploading {filename}: {stdout.decode('utf-8', errors='ignore').strip()}", flush=True)
+                      print(f"✅ Finished uploading {filename}: {output_text}", flush=True)
                   else:
                       err_msg = stderr.decode('utf-8', errors='ignore').strip() if stderr else 'Unknown error'
                       print(f"❌ Curl Error uploading {filename}: {err_msg}", flush=True)
@@ -435,11 +423,11 @@ blocks:
                   upload_queue = []
                   for root, dirs, files in os.walk(FOLDER_PATH):
                       for filename in files:
-                          if not any(ext in filename for ext in [".!qB", ".part", ".aria2"]):
+                          if not any(filename.endswith(ext) for ext in [".!qB", ".part", ".aria2"]):
                               upload_queue.append(os.path.join(root, filename))
                   
                   if upload_queue:
-                      print(f"🚀 Launching 4 parallel upload workers for {len(upload_queue)} files...", flush=True)
+                      print(f"🚀 Launching 4 parallel upload workers to Pixeldrain for {len(upload_queue)} files...", flush=True)
                       with ThreadPoolExecutor(max_workers=4) as executor:
                           executor.map(upload_single_file, upload_queue)
               EOF
