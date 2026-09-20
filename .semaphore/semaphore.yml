@@ -19,7 +19,7 @@ blocks:
             - echo "📦 Installing dependencies (7-zip, aria2, Python3)..."
             - sudo apt update -qq
             - sudo apt install -y -qq p7zip-full aria2 python3 python3-requests python3-pip curl
-            - pip3 install --no-cache-dir --break-system-packages magnet2torrent requests
+            - pip3 install --no-cache-dir --break-system-packages magnet2torrent requests natsort
             
             - echo "🧲 Processing links (Converting magnets & Queuing direct links)..."
             - mkdir -p downloads torrents 
@@ -91,6 +91,7 @@ blocks:
               import re
               import time
               import requests
+              from natsort import natsorted
 
               def get_best_trackers():
                   fallback_trackers = [
@@ -216,12 +217,12 @@ blocks:
                       return None
 
               async def main():
-                  targets = glob.glob("torrents/*.torrent")
+                  targets = natsorted(glob.glob("torrents/*.torrent"))
                   
                   if os.path.exists("direct_links.txt"):
                       with open("direct_links.txt", "r") as f:
                           links = [line.strip() for line in f if line.strip()]
-                          targets.extend(links)
+                          targets.extend(natsorted(links))
                           
                   if not targets:
                       print("⚠️ No torrents or links found to download.")
@@ -248,6 +249,7 @@ blocks:
               python3 - << 'EOF'
               import os, shutil, subprocess, re
               from collections import defaultdict
+              from natsort import natsorted
 
               folder = "downloads"
               video_ext = ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v')
@@ -286,13 +288,13 @@ blocks:
                   shutil.rmtree(group_dir)
 
               if os.path.exists(folder):
-                  for item in os.listdir(folder):
+                  for item in natsorted(os.listdir(folder)):
                       item_path = os.path.join(folder, item)
                       if os.path.isdir(item_path):
-                          vids = [
+                          vids = natsorted([
                               os.path.join(r, f) for r, _, files in os.walk(item_path)
                               for f in files if f.lower().endswith(video_ext)
-                          ]
+                          ])
                           if len(vids) > 3:
                               print(f"📦 Zipping folder: {item}")
                               folder_size = get_dir_size(item_path)
@@ -312,6 +314,8 @@ blocks:
                       if f.lower().endswith(video_ext):
                           all_videos.append(os.path.join(r, f))
 
+              all_videos = natsorted(all_videos)
+
               series_regex = re.compile(r'(?i)(?:^(.*?)[.\s_-]+)?S(\d{1,2})(?:[EX\-]|\b)')
               
               series_groups = defaultdict(list)
@@ -330,12 +334,15 @@ blocks:
                   else:
                       unmatched_videos.append(vid_path)
 
-              for group_key, vids in series_groups.items():
+              for group_key in natsorted(series_groups.keys()):
+                  vids = natsorted(series_groups[group_key])
                   if len(vids) > 3:
                       first_stem = os.path.splitext(os.path.basename(vids[0]))[0]
                       create_7z_group(first_stem, vids, folder, max_bytes)
                   else:
                       unmatched_videos.extend(vids)
+
+              unmatched_videos = natsorted(unmatched_videos)
 
               if len(unmatched_videos) > 3:
                   first_stem = os.path.splitext(os.path.basename(unmatched_videos[0]))[0]
@@ -343,7 +350,7 @@ blocks:
 
               for r, dirs, files in os.walk(folder, topdown=False):
                   if r == folder: continue
-                  for f in files:
+                  for f in natsorted(files):
                       if f.lower().endswith(media_ext):
                           src = os.path.join(r, f)
                           dst = os.path.join(folder, f)
@@ -361,6 +368,7 @@ blocks:
               import time
               import fcntl
               from concurrent.futures import ThreadPoolExecutor
+              from natsort import natsorted
 
               FILEMIRAGE_API_TOKEN = '9QQH-DGES-CWQZ-FXNV'
               FOLDER_PATH = 'downloads'
@@ -425,6 +433,8 @@ blocks:
                       for filename in files:
                           if not any(ext in filename for ext in [".!qB", ".part", ".aria2"]):
                               upload_queue.append(os.path.join(root, filename))
+                  
+                  upload_queue = natsorted(upload_queue)
                   
                   if upload_queue:
                       print(f"🚀 Launching 4 parallel upload workers for {len(upload_queue)} files...", flush=True)
