@@ -121,7 +121,7 @@ blocks:
 
               LIVE_TRACKERS = get_best_trackers()
 
-              async def download_target(target, sem, stuck_timeout=25, max_retries=15):
+              async def download_target(target, sem, stuck_timeout=90, max_retries=15):
                   async with sem:
                       for attempt in range(1, max_retries + 1):
                           print(f"📥 [Attempt {attempt}/{max_retries}] Starting: {target[:80]}", flush=True)
@@ -167,6 +167,10 @@ blocks:
                                   line_str = line.decode('utf-8', errors='ignore').strip()
                                   
                                   if line_str:
+                                      # If aria2 is actively communicating with peers/trackers or getting metadata, reset the idle timer
+                                      if any(k in line_str for k in ["Peer", "BitTorrent", "Metadata", "Connected", "DHT"]):
+                                          start_time = time.time()
+
                                       if not download_started:
                                           match = re.search(r'\[#\w+\s+([0-9\.]+)([KMGTP]?i?B)/', line_str)
                                           if match:
