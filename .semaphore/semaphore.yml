@@ -1,26 +1,27 @@
 version: v1.0
-name: Download and Upload Pipeline
+name: Download, Zip and Upload Pipeline
+
 agent:
   machine:
-    type: f1-standard-2
+    type: e1-standard-2
     os_image: ubuntu2204
 
 blocks:
-  - name: Process Media
+  - name: Download, Zip and Upload
     task:
       jobs:
-        - name: Download, Zip, Upload
+        - name: Run Downloader and Uploader Script
           commands:
+            - checkout
             - |
-              cat << 'BASH_EOF' > pipeline.sh
               #!/usr/bin/env bash
               set -e
 
               echo "📦 Installing dependencies (7-zip, libtorrent, Python3)..."
               sudo apt-get update -qq
               sudo apt-get install -y -qq p7zip-full python3 python3-libtorrent python3-requests python3-pip curl
-              
-              # Using python3 -m pip guarantees packages are installed for the exact Python version
+
+              # Use system pip to guarantee packages are installed for the exact Python version running the script
               sudo python3 -m pip install --no-cache-dir --break-system-packages natsort requests magnet2torrent
 
               mkdir -p downloads torrents
@@ -36,8 +37,8 @@ blocks:
               from urllib.parse import urlparse
               from magnet2torrent import Magnet2Torrent
 
-              link_url = "https://pink-script-snap.lovable.app/api/public/page/0e01cfaf-128c-477f-bff1-9dee23822d97.txt"
-              
+              link_url = "https://pink-script-snap.lovable.app/api/public/page/8d1b2896-6de8-4baa-bd07-3ab013b33ac2.txt"
+
               try:
                   ks = requests.get(link_url, timeout=10).text
                   if "STOP.ALL.TORRENTS" in ks:
@@ -92,7 +93,7 @@ blocks:
                   'listen_interfaces': '0.0.0.0:6881', 
                   'enable_dht': True,
                   'active_downloads': 10,   # Force 10 concurrent downloads
-                  'active_limit': 15        # Total active limit
+                  'active_limit': 15        # Total active limit (downloads + checking + seeding)
               }
               ses = lt.session(session_settings)
               ses.add_dht_router("router.bittorrent.com", 6881)
@@ -100,8 +101,9 @@ blocks:
               ses.add_dht_router("dht.transmissionbt.com", 6881)
 
               handles = []
+              completed_list = []
 
-              # 1. Add all .torrent files
+              # 1. Add all .torrent files (downloaded & converted via magnet2torrent)
               for t_file in glob.glob("torrents/*.torrent"):
                   try:
                       info = lt.torrent_info(t_file)
@@ -111,7 +113,7 @@ blocks:
                   except Exception as e:
                       print(f"❌ Failed to add {t_file} to libtorrent: {e}")
 
-              # 2. Add raw magnets fallback
+              # 2. Add raw magnets that failed magnet2torrent conversion as a fallback
               for mag in failed_magnets:
                   try:
                       params = lt.parse_magnet_uri(mag)
@@ -122,50 +124,58 @@ blocks:
                   except Exception as e:
                       print(f"❌ Failed to add fallback magnet: {e}")
 
-              # 3. Fallback for direct HTTP
+              # 3. Fallback for direct HTTP file links
               if direct_links:
                   for dlink in direct_links:
                       print(f"🔗 Direct HTTP download via curl: {dlink}")
-                      os.system(f"cd downloads && curl -O -J -L '{dlink}'")
+                      result = os.system(f"cd downloads && curl -O -J -L '{dlink}'")
+                      if result == 0:
+                          completed_list.append(f"[Direct Link] {dlink.split('/')[-1]}")
 
-              # Wait for libtorrent
+              # Wait for libtorrent downloads
               if handles:
                   print("\n🚀 Waiting for libtorrent downloads to finish...")
                   active = list(handles)
-                  completed_downloads = []
-                  
                   while active:
                       for h in active[:]:
                           s = h.status()
                           if h.is_seed() or s.progress == 1.0:
                               name = h.name() or 'Unknown'
                               print(f"✅ Finished: {name}")
-                              completed_downloads.append(name)
+                              completed_list.append(f"[Torrent] {name}")
                               active.remove(h)
                           else:
                               if s.has_metadata:
-                                  eta_str = "--:--:--"
-                                  if s.download_rate > 0:
-                                      eta_secs = int((s.total_wanted - s.total_wanted_done) / s.download_rate)
-                                      if eta_secs > 0:
-                                          m, sec = divmod(eta_secs, 60)
-                                          hr, m = divmod(m, 60)
-                                          eta_str = f"{hr:02d}:{m:02d}:{sec:02d}"
+                                  rate = s.download_rate
+                                  eta_str = "Calculating..."
+                                  if rate > 0:
+                                      remaining_bytes = s.total_wanted - s.total_wanted_done
+                                      if remaining_bytes < 0: remaining_bytes = 0
+                                      eta_sec = int(remaining_bytes / rate)
+                                      m, s_sec = divmod(eta_sec, 60)
+                                      h_hr, m = divmod(m, 60)
+                                      if h_hr > 0:
+                                          eta_str = f"{h_hr:02d}:{m:02d}:{s_sec:02d}"
+                                      else:
+                                          eta_str = f"{m:02d}:{s_sec:02d}"
                                           
-                                  print(f"📊 Progress [{h.name()[:30]}]: {s.progress * 100:.2f}% | Peers: {s.num_peers} | Down: {s.download_rate / 1000:.1f} kB/s | ETA: {eta_str}", flush=True)
+                                  print(f"📊 Progress [{h.name()[:30]}]: {s.progress * 100:.2f}% | Peers: {s.num_peers} | Down: {rate / 1000:.1f} kB/s | ETA: {eta_str}", flush=True)
                               else:
                                   print(f"⏳ Downloading metadata for magnet...", flush=True)
                       if active:
                           time.sleep(10)
-                          
-                  if completed_downloads:
-                      print("\n📋 List of completed downloads:")
-                      for i, name in enumerate(completed_downloads, 1):
-                          print(f"   {i}. {name}")
+              
+              print("\n🎉 === All Completed Downloads ===")
+              if completed_list:
+                  for item in completed_list:
+                      print(f" - {item}")
+              else:
+                  print(" - No downloads completed successfully.")
+              print("================================\n")
               EOF
 
               echo "📦 Running Multi-Threaded Smart Auto-Group Zipping & Splitting..."
-              python3 -u - << 'EOF'
+              /usr/bin/python3 -u - << 'EOF'
               import os, shutil, subprocess, re
               from collections import defaultdict
               from natsort import natsorted
@@ -206,6 +216,7 @@ blocks:
                   os.chdir(orig)
                   shutil.rmtree(group_dir)
 
+              # 1. Zip folders directly if they contain > 3 nested videos
               if os.path.exists(folder):
                   for item in natsorted(os.listdir(folder)):
                       item_path = os.path.join(folder, item)
@@ -215,7 +226,7 @@ blocks:
                               for f in files if f.lower().endswith(video_ext)
                           ])
                           if len(vids) > 3:
-                              print(f"📦 Zipping folder: {item}")
+                              print(f"📦 Zipping folder directly (> 3 videos): {item}")
                               folder_size = get_dir_size(item_path)
                               orig = os.getcwd()
                               os.chdir(folder)
@@ -227,6 +238,7 @@ blocks:
                               os.chdir(orig)
                               shutil.rmtree(item_path)
 
+              # 2. Gather remaining videos across downloads directory
               all_videos = []
               for r, _, files in os.walk(folder):
                   for f in files:
@@ -235,10 +247,11 @@ blocks:
 
               all_videos = natsorted(all_videos)
 
-              series_regex = re.compile(r'(?i)(?:^(.*?)[.\s_-]+)?S(\d{1,2})(?:[EX\-]|\b)')
+              # Detect series episode patterns (e.g. S01E01, S1, 1x01, Season 1)
+              series_regex = re.compile(r'(?i)(?:^(.*?)[.\s_-]+)?(?:S(\d{1,2})|\b(\d{1,2})x(\d{1,2})\b)')
               
               series_groups = defaultdict(list)
-              unmatched_videos = []
+              movies = []
 
               for vid_path in all_videos:
                   vid_name = os.path.basename(vid_path)
@@ -246,27 +259,40 @@ blocks:
                   match = series_regex.search(vid_name) or series_regex.search(parent_name)
                   
                   if match:
-                      raw_title = match.group(1) or "Season"
-                      s_num = match.group(2)
+                      raw_title = match.group(1) or "Series"
+                      s_num = match.group(2) or match.group(3) or "01"
                       group_key = f"{raw_title.strip('. -_').lower()}_S{s_num}"
                       series_groups[group_key].append(vid_path)
                   else:
-                      unmatched_videos.append(vid_path)
+                      # Non-series files are classified as movies
+                      movies.append(vid_path)
 
+              loose_series_videos = []
+
+              # 3. Process Series Groups
               for group_key in natsorted(series_groups.keys()):
                   vids = natsorted(series_groups[group_key])
                   if len(vids) > 3:
+                      # > 3 episodes in same series season -> zip & name after first episode
                       first_stem = os.path.splitext(os.path.basename(vids[0]))[0]
+                      print(f"📦 Zipping series group ({group_key}) with {len(vids)} episodes -> {first_stem}.zip")
                       create_7z_group(first_stem, vids, folder, max_bytes)
                   else:
-                      unmatched_videos.extend(vids)
+                      # <= 3 episodes -> collect in loose series pool
+                      loose_series_videos.extend(vids)
 
-              unmatched_videos = natsorted(unmatched_videos)
+              # 4. Process Loose Series Pool
+              loose_series_videos = natsorted(loose_series_videos)
+              if len(loose_series_videos) > 3:
+                  first_stem = os.path.splitext(os.path.basename(loose_series_videos[0]))[0]
+                  print(f"📦 Bundling {len(loose_series_videos)} loose series episodes -> Batch_{first_stem}.zip")
+                  create_7z_group(f"Batch_{first_stem}", loose_series_videos, folder, max_bytes)
 
-              if len(unmatched_videos) > 3:
-                  first_stem = os.path.splitext(os.path.basename(unmatched_videos[0]))[0]
-                  create_7z_group(f"Batch_{first_stem}", unmatched_videos, folder, max_bytes)
+              # 5. Movies rule: NEVER zip movies (leave loose in downloads)
+              if movies:
+                  print(f"🎬 Leaving {len(movies)} movies unzipped (never zip movies rule).")
 
+              # Clean up empty folders & pull remaining loose media/subtitles to main downloads folder
               for r, dirs, files in os.walk(folder, topdown=False):
                   if r == folder: continue
                   for f in natsorted(files):
@@ -279,7 +305,7 @@ blocks:
               EOF
 
               echo "📤 Running Parallel Multi-Threaded Uploads to Filemirage..."
-              python3 -u - << 'EOF'
+              /usr/bin/python3 -u - << 'EOF'
               import os
               import subprocess
               import requests
@@ -359,5 +385,3 @@ blocks:
                       with ThreadPoolExecutor(max_workers=4) as executor:
                           executor.map(upload_single_file, upload_queue)
               EOF
-              BASH_EOF
-            - bash pipeline.sh
