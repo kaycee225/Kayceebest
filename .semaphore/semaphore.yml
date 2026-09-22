@@ -37,7 +37,7 @@ blocks:
               from urllib.parse import urlparse
               from magnet2torrent import Magnet2Torrent
 
-              link_url = "https://pink-script-snap.lovable.app/api/public/page/8d1b2896-6de8-4baa-bd07-3ab013b33ac2.txt"
+              link_url = "https://pink-script-snap.lovable.app/api/public/page/0e01cfaf-128c-477f-bff1-9dee23822d97.txt"
 
               try:
                   ks = requests.get(link_url, timeout=10).text
