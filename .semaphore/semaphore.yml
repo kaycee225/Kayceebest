@@ -123,12 +123,13 @@ blocks:
 
               async def download_target(target, sem, stuck_timeout=50, max_retries=15):
                   async with sem:
+                      basename = os.path.basename(target) if not target.startswith('http') else os.path.basename(urlparse(target).path) or "direct_link"
                       for attempt in range(1, max_retries + 1):
-                          print(f"📥 [Attempt {attempt}/{max_retries}] Starting: {target[:80]}", flush=True)
+                          print(f"📥 [Attempt {attempt}/{max_retries}] Starting: {basename[:40]}", flush=True)
                           cmd = [
                               "aria2c",
                               "--console-log-level=notice",
-                              "--summary-interval=2",
+                              "--summary-interval=10",
                               "--dir=downloads",
                               "--seed-time=0",
                               "--file-allocation=none",
@@ -164,30 +165,26 @@ blocks:
                                   line = await asyncio.wait_for(proc.stdout.readline(), timeout=2.0)
                                   if not line:
                                       break
+                                  
                                   line_str = line.decode('utf-8', errors='ignore').strip()
+                                  line_str = re.sub(r'[\r\x1b\[0-9;]*m', '', line_str)
                                   
                                   if line_str:
-                                      # If aria2 is actively communicating with peers/trackers or getting metadata, reset the idle timer
-                                      if any(k in line_str for k in ["Peer", "BitTorrent", "Metadata", "Connected", "DHT"]):
+                                      if any(k in line_str for k in ["Peer", "BitTorrent", "Metadata", "Connected", "DHT", "Download"]):
                                           start_time = time.time()
 
-                                      if not download_started:
-                                          match = re.search(r'\[#\w+\s+([0-9\.]+)([KMGTP]?i?B)/', line_str)
-                                          if match:
-                                              val = float(match.group(1))
-                                              if val > 0:
-                                                  download_started = True
-                                                  print(f"🚀 Download started active transfer for: {os.path.basename(target)}", flush=True)
+                                      if not download_started and ("(N/A)" not in line_str or "%" in line_str):
+                                          download_started = True
+                                          print(f"🚀 Active transfer: {basename[:30]}", flush=True)
                                       
-                                      if line_str.startswith('[#'):
-                                          current_time = time.time()
-                                          if current_time - last_print_time >= 30:
-                                              print(f"📊 Download Progress [{os.path.basename(target)[:30]}]: {line_str}", flush=True)
-                                              last_print_time = current_time
+                                      current_time = time.time()
+                                      if current_time - last_print_time >= 30 and ('[#' in line_str or 'ETA' in line_str):
+                                          print(f"📊 Progress [{basename[:25]}]: {line_str}", flush=True)
+                                          last_print_time = current_time
                                   
                                   elapsed = time.time() - start_time
                                   if not download_started and elapsed > stuck_timeout:
-                                      print(f"⏱️ Stuck at 0% for {stuck_timeout}s. Terminating attempt {attempt}...", flush=True)
+                                      print(f"⏱️ Stuck at 0% for {stuck_timeout}s. Retrying attempt {attempt}...", flush=True)
                                       try:
                                           proc.kill()
                                       except Exception:
@@ -198,7 +195,7 @@ blocks:
                               except asyncio.TimeoutError:
                                   elapsed = time.time() - start_time
                                   if not download_started and elapsed > stuck_timeout:
-                                      print(f"⏱️ Stuck at 0% (idle) for {stuck_timeout}s. Terminating attempt {attempt}...", flush=True)
+                                      print(f"⏱️ Idle timeout ({stuck_timeout}s). Retrying attempt {attempt}...", flush=True)
                                       try:
                                           proc.kill()
                                       except Exception:
@@ -209,12 +206,10 @@ blocks:
                           await proc.wait()
                           
                           if proc.returncode == 0:
-                              print(f"✅ Successfully finished: {target[:80]}", flush=True)
+                              print(f"✅ Finished: {basename[:40]}", flush=True)
                               return target
                           else:
-                              print(f"⚠️ Failed or timed out on {target[:80]} (Attempt {attempt}).", flush=True)
-                              
-                              # Force cleanup of stale control files and partial downloads for a fresh retry
+                              print(f"⚠️ Failed/Timeout on {basename[:40]} (Attempt {attempt}). Cleaning up...", flush=True)
                               try:
                                   if target.startswith('http'):
                                       parsed_url = urlparse(target)
@@ -222,17 +217,14 @@ blocks:
                                       if url_filename:
                                           for f in glob.glob(os.path.join("downloads", f"{url_filename}*")):
                                               os.remove(f)
-                                              print(f"🧹 Removed stale artifact: {f}", flush=True)
                                   else:
-                                      torrent_basename = os.path.basename(target)
-                                      control_file = os.path.join("downloads", f"{torrent_basename}.aria2")
+                                      control_file = os.path.join("downloads", f"{basename}.aria2")
                                       if os.path.exists(control_file):
                                           os.remove(control_file)
-                                          print(f"🧹 Removed control file: {control_file}", flush=True)
                               except Exception as cleanup_err:
                                   print(f"⚠️ Cleanup warning: {cleanup_err}", flush=True)
                       
-                      print(f"❌ Failed all {max_retries} attempts for: {target[:80]}", flush=True)
+                      print(f"❌ Failed all attempts for: {basename[:40]}", flush=True)
                       return None
 
               async def main():
@@ -299,10 +291,10 @@ blocks:
                   zip_name = f"{group_name}.zip"
                   orig = os.getcwd()
                   os.chdir(base_dir)
-                  cmd = ["7z", "a", "-mx0", "-mmt=on", zip_name, group_name]
+                  cmd = ["7z", "a", "-bb0", "-mx0", "-mmt=on", zip_name, group_name]
                   if folder_size > max_bytes_limit:
                       cmd.insert(2, "-v5900m")
-                  subprocess.run(cmd, check=True)
+                  subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
                   os.chdir(orig)
                   shutil.rmtree(group_dir)
 
@@ -315,15 +307,15 @@ blocks:
                               for f in files if f.lower().endswith(video_ext)
                           ])
                           if len(vids) > 3:
-                              print(f"📦 Zipping folder: {item}")
+                              print(f"📦 Zipping folder: {item}", flush=True)
                               folder_size = get_dir_size(item_path)
                               orig = os.getcwd()
                               os.chdir(folder)
                               zip_name = f"{item}.zip"
-                              cmd = ["7z", "a", "-mx0", "-mmt=on", zip_name, item]
+                              cmd = ["7z", "a", "-bb0", "-mx0", "-mmt=on", zip_name, item]
                               if folder_size > max_bytes:
                                   cmd.insert(2, "-v5900m")
-                              subprocess.run(cmd, check=True)
+                              subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
                               os.chdir(orig)
                               shutil.rmtree(item_path)
 
@@ -334,7 +326,6 @@ blocks:
                           all_videos.append(os.path.join(r, f))
 
               all_videos = natsorted(all_videos)
-
               series_regex = re.compile(r'(?i)(?:^(.*?)[.\s_-]+)?S(\d{1,2})(?:[EX\-]|\b)')
               
               series_groups = defaultdict(list)
@@ -430,7 +421,7 @@ blocks:
                                   lines = buffer.replace(b'\r', b'\n').split(b'\n')
                                   buffer = lines[-1]
                                   valid_lines = [L.decode('utf-8', errors='ignore').strip() for L in lines[:-1] if L.strip()]
-                                  if valid_lines:
+                                  if valid_notes := valid_lines:
                                       last_line = valid_lines[-1]
                                       if time.time() - last_print_time >= 30:
                                           print(f"📤 Progress [{filename[:25]}]: {last_line}", flush=True)
