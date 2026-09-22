@@ -91,6 +91,7 @@ blocks:
               import re
               import time
               import requests
+              from urllib.parse import urlparse
               from natsort import natsorted
 
               def get_best_trackers():
@@ -205,13 +206,24 @@ blocks:
                               return target
                           else:
                               print(f"⚠️ Failed or timed out on {target[:80]} (Attempt {attempt}).", flush=True)
-                              if os.path.exists(target):
-                                  control_file = f"downloads/{os.path.basename(target)}.aria2"
-                                  if os.path.exists(control_file):
-                                      try:
+                              
+                              # Force cleanup of stale control files and partial downloads for a fresh retry
+                              try:
+                                  if target.startswith('http'):
+                                      parsed_url = urlparse(target)
+                                      url_filename = os.path.basename(parsed_url.path)
+                                      if url_filename:
+                                          for f in glob.glob(os.path.join("downloads", f"{url_filename}*")):
+                                              os.remove(f)
+                                              print(f"🧹 Removed stale artifact: {f}", flush=True)
+                                  else:
+                                      torrent_basename = os.path.basename(target)
+                                      control_file = os.path.join("downloads", f"{torrent_basename}.aria2")
+                                      if os.path.exists(control_file):
                                           os.remove(control_file)
-                                      except Exception:
-                                          pass
+                                          print(f"🧹 Removed control file: {control_file}", flush=True)
+                              except Exception as cleanup_err:
+                                  print(f"⚠️ Cleanup warning: {cleanup_err}", flush=True)
                       
                       print(f"❌ Failed all {max_retries} attempts for: {target[:80]}", flush=True)
                       return None
