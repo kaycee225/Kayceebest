@@ -17,27 +17,55 @@ blocks:
               #!/usr/bin/env bash
               set -e
 
-              echo "📦 Installing dependencies (7-zip, libtorrent, Python3)..."
+              echo "📦 Installing dependencies (7-zip, libtorrent, Python3, wget)..."
               sudo apt-get update -qq
-              sudo apt-get install -y -qq p7zip-full python3 python3-libtorrent python3-requests python3-pip curl
+              sudo apt-get install -y -qq p7zip-full python3 python3-libtorrent python3-requests python3-pip curl wget
 
               # Use system pip to guarantee packages are installed for the exact Python version running the script
               sudo python3 -m pip install --no-cache-dir --break-system-packages natsort requests magnet2torrent
 
               mkdir -p downloads torrents
 
-              echo "🧲 Processing links and starting libtorrent..."
+              echo "🧲 Processing links and starting libtorrent & wget..."
               /usr/bin/python3 -u - << 'EOF'
               import os
               import time
               import asyncio
               import glob
               import requests
+              import subprocess
               import libtorrent as lt
               from urllib.parse import urlparse
+              from concurrent.futures import ThreadPoolExecutor
               from magnet2torrent import Magnet2Torrent
 
               link_url = "https://utfdtjcnbprlhkhsdovt.supabase.co/functions/v1/download-page/354dcb17-48af-495d-b98f-c9c1bd268c33"
+              processed_links = set()
+
+              def clean_filename_query_params(target_dir):
+                  for root, _, files in os.walk(target_dir):
+                      for f in files:
+                          if '?' in f:
+                              clean_name = f.split('?')[0]
+                              old_path = os.path.join(root, f)
+                              new_path = os.path.join(root, clean_name)
+                              try:
+                                  if not os.path.exists(new_path):
+                                      os.rename(old_path, new_path)
+                                  else:
+                                      os.rename(old_path, old_path.replace('?', '_'))
+                              except Exception:
+                                  pass
+
+              def download_wget(link, target_dir="./downloads"):
+                  try:
+                      print(f"📥 [wget] Downloading regular link: {link[:60]}...", flush=True)
+                      cmd = ["wget", "-q", "--content-disposition", "-P", target_dir, link]
+                      subprocess.run(cmd, check=True)
+                      clean_filename_query_params(target_dir)
+                      print(f"✅ [wget] Finished download: {link[:60]}", flush=True)
+                  except Exception as e:
+                      print(f"❌ [wget] Failed downloading link ({e}): {link[:60]}", flush=True)
 
               try:
                   ks = requests.get(link_url, timeout=10).text
@@ -56,7 +84,9 @@ blocks:
                       link = link.strip()
                       if not link or link.startswith('#') or link.endswith(' NO'):
                           continue
-                          
+                      
+                      processed_links.add(link)
+
                       if link.startswith('magnet:'):
                           print(f"📥 Converting magnet: {link[:60]}...", flush=True)
                           try:
@@ -70,11 +100,13 @@ blocks:
                               print(f"⚠️ Magnet conversion failed ({e}). Queuing raw magnet for libtorrent fallback!", flush=True)
                               failed_magnets.append(link)
                       elif link.startswith('http'):
-                          if link.endswith('.torrent'):
+                          parsed = urlparse(link)
+                          if parsed.path.lower().endswith('.torrent'):
                               try:
                                   tor_data = requests.get(link, timeout=15).content
-                                  parsed = urlparse(link)
                                   filename = os.path.basename(parsed.path) or f"download_{i}.torrent"
+                                  if not filename.endswith('.torrent'):
+                                      filename += ".torrent"
                                   with open(os.path.join('torrents', filename), 'wb') as tf:
                                       tf.write(tor_data)
                                   print(f"✅ Downloaded .torrent file: {filename}")
@@ -124,51 +156,114 @@ blocks:
                   except Exception as e:
                       print(f"❌ Failed to add fallback magnet: {e}")
 
-              # 3. Fallback for direct HTTP file links
-              if direct_links:
-                  for dlink in direct_links:
-                      print(f"🔗 Direct HTTP download via curl: {dlink}")
-                      result = os.system(f"cd downloads && curl -O -J -L '{dlink}'")
-                      if result == 0:
-                          completed_list.append(f"[Direct Link] {dlink.split('/')[-1]}")
+              # 3. Queue direct HTTP file links with wget concurrently
+              wget_executor = ThreadPoolExecutor(max_workers=4)
+              wget_futures = []
 
-              # Wait for libtorrent downloads
-              if handles:
-                  print("\n🚀 Waiting for libtorrent downloads to finish...")
-                  active = list(handles)
-                  while active:
-                      for h in active[:]:
-                          s = h.status()
-                          if h.is_seed() or s.progress == 1.0:
-                              name = h.name() or 'Unknown'
-                              print(f"✅ Finished: {name}")
-                              completed_list.append(f"[Torrent] {name}")
-                              active.remove(h)
+              for dlink in direct_links:
+                  fut = wget_executor.submit(download_wget, dlink, "./downloads")
+                  wget_futures.append(fut)
+
+              def handle_new_link(link):
+                  processed_links.add(link)
+                  if link.startswith('magnet:'):
+                      try:
+                          params = lt.parse_magnet_uri(link)
+                          params.save_path = './downloads'
+                          h = ses.add_torrent(params)
+                          handles.append(h)
+                          print(f"🧲 Added new magnet link to libtorrent: {link[:50]}...")
+                      except Exception as e:
+                          print(f"❌ Failed adding magnet ({e})")
+                  elif link.startswith('http'):
+                      parsed = urlparse(link)
+                      if parsed.path.lower().endswith('.torrent'):
+                          try:
+                              tor_data = requests.get(link, timeout=15).content
+                              filename = os.path.basename(parsed.path) or "new_torrent.torrent"
+                              if not filename.endswith('.torrent'):
+                                  filename += ".torrent"
+                              t_path = os.path.join("torrents", filename)
+                              with open(t_path, 'wb') as tf:
+                                  tf.write(tor_data)
+                              info = lt.torrent_info(t_path)
+                              h = ses.add_torrent({'ti': info, 'save_path': './downloads'})
+                              handles.append(h)
+                              print(f"🧲 Added new .torrent file to libtorrent: {filename}")
+                          except Exception as e:
+                              print(f"❌ Failed adding .torrent ({e})")
+                      else:
+                          fut = wget_executor.submit(download_wget, link, "./downloads")
+                          wget_futures.append(fut)
+
+              # Wait for libtorrent downloads & wget workers
+              print("\n🚀 Waiting for downloads to finish...")
+              active_handles = list(handles)
+              last_check_time = time.time()
+              CHECK_INTERVAL = 20
+
+              while True:
+                  now = time.time()
+                  # Silent check for new links and stop trigger every 20 sec
+                  if now - last_check_time >= CHECK_INTERVAL:
+                      last_check_time = now
+                      try:
+                          res = requests.get(link_url, timeout=10)
+                          if res.status_code == 200:
+                              ks_text = res.text
+                              if "STOP.ALL.TORRENTS" in ks_text:
+                                  print("🛑 Global kill switch active. Stopping downloads.")
+                                  exit(0)
+                              
+                              for line in ks_text.splitlines():
+                                  l = line.strip()
+                                  if l and not l.startswith('#') and not l.endswith(' NO') and l not in processed_links:
+                                      handle_new_link(l)
+                      except Exception:
+                          pass
+
+                  # Check libtorrent handle status
+                  for h in active_handles[:]:
+                      s = h.status()
+                      if h.is_seed() or s.progress == 1.0:
+                          name = h.name() or 'Unknown'
+                          print(f"✅ Finished: {name}")
+                          completed_list.append(f"[Torrent] {name}")
+                          active_handles.remove(h)
+                      else:
+                          if s.has_metadata:
+                              rate = s.download_rate
+                              eta_str = "Calculating..."
+                              if rate > 0:
+                                  remaining_bytes = s.total_wanted - s.total_wanted_done
+                                  if remaining_bytes < 0: remaining_bytes = 0
+                                  eta_sec = int(remaining_bytes / rate)
+                                  m, s_sec = divmod(eta_sec, 60)
+                                  h_hr, m = divmod(m, 60)
+                                  if h_hr > 0:
+                                      eta_str = f"{h_hr:02d}:{m:02d}:{s_sec:02d}"
+                                  else:
+                                      eta_str = f"{m:02d}:{s_sec:02d}"
+                                      
+                              print(f"📊 Progress [{h.name()[:30]}]: {s.progress * 100:.2f}% | Peers: {s.num_peers} | Down: {rate / 1000:.1f} kB/s | ETA: {eta_str}", flush=True)
                           else:
-                              if s.has_metadata:
-                                  rate = s.download_rate
-                                  eta_str = "Calculating..."
-                                  if rate > 0:
-                                      remaining_bytes = s.total_wanted - s.total_wanted_done
-                                      if remaining_bytes < 0: remaining_bytes = 0
-                                      eta_sec = int(remaining_bytes / rate)
-                                      m, s_sec = divmod(eta_sec, 60)
-                                      h_hr, m = divmod(m, 60)
-                                      if h_hr > 0:
-                                          eta_str = f"{h_hr:02d}:{m:02d}:{s_sec:02d}"
-                                      else:
-                                          eta_str = f"{m:02d}:{s_sec:02d}"
-                                          
-                                  print(f"📊 Progress [{h.name()[:30]}]: {s.progress * 100:.2f}% | Peers: {s.num_peers} | Down: {rate / 1000:.1f} kB/s | ETA: {eta_str}", flush=True)
-                              else:
-                                  print(f"⏳ Downloading metadata for magnet...", flush=True)
-                      if active:
-                          time.sleep(10)
-              
+                              print(f"⏳ Downloading metadata for magnet...", flush=True)
+
+                  wget_done = all(f.done() for f in wget_futures)
+
+                  if not active_handles and wget_done:
+                      break
+
+                  time.sleep(5)
+
+              wget_executor.shutdown(wait=True)
+              clean_filename_query_params("./downloads")
+
               print("\n🎉 === All Completed Downloads ===")
-              if completed_list:
+              if completed_list or wget_futures:
                   for item in completed_list:
                       print(f" - {item}")
+                  print(" - Direct HTTP downloads completed.")
               else:
                   print(" - No downloads completed successfully.")
               print("================================\n")
@@ -260,37 +355,25 @@ blocks:
                   
                   if match:
                       raw_title = match.group(1) or "Series"
-                      s_num = match.group(2) or match.group(3) or "01"
-                      group_key = f"{raw_title.strip('. -_').lower()}_S{s_num}"
+                      s_num = (match.group(2) or match.group(3) or "1").zfill(2)
+                      clean_title = re.sub(r'[^a-zA-Z0-9]', '', raw_title).lower() or "series"
+                      group_key = f"{clean_title}_S{s_num}"
                       series_groups[group_key].append(vid_path)
                   else:
                       # Non-series files are classified as movies
                       movies.append(vid_path)
 
-              loose_series_videos = []
-
-              # 3. Process Series Groups
+              # 3. Process Series Groups (> 3 episodes in same series season -> zip)
               for group_key in natsorted(series_groups.keys()):
                   vids = natsorted(series_groups[group_key])
                   if len(vids) > 3:
-                      # > 3 episodes in same series season -> zip & name after first episode
                       first_stem = os.path.splitext(os.path.basename(vids[0]))[0]
                       print(f"📦 Zipping series group ({group_key}) with {len(vids)} episodes -> {first_stem}.zip")
                       create_7z_group(first_stem, vids, folder, max_bytes)
-                  else:
-                      # <= 3 episodes -> collect in loose series pool
-                      loose_series_videos.extend(vids)
 
-              # 4. Process Loose Series Pool
-              loose_series_videos = natsorted(loose_series_videos)
-              if len(loose_series_videos) > 3:
-                  first_stem = os.path.splitext(os.path.basename(loose_series_videos[0]))[0]
-                  print(f"📦 Bundling {len(loose_series_videos)} loose series episodes -> Batch_{first_stem}.zip")
-                  create_7z_group(f"Batch_{first_stem}", loose_series_videos, folder, max_bytes)
-
-              # 5. Movies rule: NEVER zip movies (leave loose in downloads)
+              # 4. Movies & unzipped series files remain loose in main downloads folder
               if movies:
-                  print(f"🎬 Leaving {len(movies)} movies unzipped (never zip movies rule).")
+                  print(f"🎬 Leaving {len(movies)} movies unzipped.")
 
               # Clean up empty folders & pull remaining loose media/subtitles to main downloads folder
               for r, dirs, files in os.walk(folder, topdown=False):
