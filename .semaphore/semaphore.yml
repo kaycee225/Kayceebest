@@ -8,17 +8,17 @@ agent:
     os_image: ubuntu2204
 
 blocks:
-  - name: Download, Zip & Upload
+  - name: Download & Upload
     task:
       jobs:
-        - name: Download, Zip and Upload Files
+        - name: Download and Upload Files
           execution_time_limit:
             hours: 1
           commands:
             - checkout
-            - echo "📦 Installing dependencies (7-zip, aria2, Python3)..."
+            - echo "📦 Installing dependencies (aria2, Python3)..."
             - sudo apt update -qq
-            - sudo apt install -y -qq p7zip-full aria2 python3 python3-requests python3-pip curl
+            - sudo apt install -y -qq aria2 python3 python3-requests python3-pip curl
             - pip3 install --no-cache-dir --break-system-packages magnet2torrent requests natsort
             
             - echo "🧲 Processing links (Converting magnets & Queuing direct links)..."
@@ -352,11 +352,10 @@ blocks:
               asyncio.run(main())
               EOF
 
-            - echo "📦 Running Smart Zipping Rules (Movies Never Zipped, >3 Episode Series Zipped)..."
+            - echo "📁 Organizing downloaded files (Flattening subdirectories)..."
             - |
               python3 - << 'EOF'
-              import os, shutil, subprocess, re, time, threading, requests
-              from collections import defaultdict
+              import os, shutil, time, threading, requests
               from natsort import natsorted
 
               LINK_URL = "https://utfdtjcnbprlhkhsdovt.supabase.co/functions/v1/download-page/354dcb17-48af-495d-b98f-c9c1bd268c33"
@@ -377,100 +376,8 @@ blocks:
               folder = "downloads"
               video_ext = ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v')
               media_ext = video_ext + ('.srt', '.ass', '.vtt', '.sub')
-              max_bytes = 10000 * 1024 * 1024
 
-              def get_dir_size(p):
-                  return sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fn in os.walk(p) for f in fn)
-
-              def create_7z_group(group_name, file_paths, base_dir, max_bytes_limit):
-                  group_dir = os.path.join(base_dir, group_name)
-                  os.makedirs(group_dir, exist_ok=True)
-                  
-                  files_to_move = list(file_paths)
-                  for p in file_paths:
-                      base_stem = os.path.splitext(p)[0]
-                      for sub_ext in ('.srt', '.ass', '.vtt', '.sub'):
-                          sub_file = base_stem + sub_ext
-                          if os.path.exists(sub_file) and sub_file not in files_to_move:
-                              files_to_move.append(sub_file)
-
-                  for p in files_to_move:
-                      dst = os.path.join(group_dir, os.path.basename(p))
-                      if p != dst and not os.path.exists(dst):
-                          shutil.move(p, dst)
-                  
-                  folder_size = get_dir_size(group_dir)
-                  zip_name = f"{group_name}.zip"
-                  orig = os.getcwd()
-                  os.chdir(base_dir)
-                  cmd = ["7z", "a", "-bb0", "-mx0", "-mmt=on", zip_name, group_name]
-                  if folder_size > max_bytes_limit:
-                      cmd.insert(2, "-v5900m")
-                  subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
-                  os.chdir(orig)
-                  shutil.rmtree(group_dir)
-
-              # 1. Folders with over 3 nested videos zip by themselves naturally
-              for item in natsorted(os.listdir(folder)):
-                  item_path = os.path.join(folder, item)
-                  if os.path.isdir(item_path):
-                      vids = natsorted([
-                          os.path.join(r, f) for r, _, files in os.walk(item_path)
-                          for f in files if f.lower().endswith(video_ext)
-                      ])
-                      if len(vids) > 3:
-                          print(f"📦 Zipping folder: {item}", flush=True)
-                          folder_size = get_dir_size(item_path)
-                          orig = os.getcwd()
-                          os.chdir(folder)
-                          zip_name = f"{item}.zip"
-                          cmd = ["7z", "a", "-bb0", "-mx0", "-mmt=on", zip_name, item]
-                          if folder_size > max_bytes:
-                              cmd.insert(2, "-v5900m")
-                          subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
-                          os.chdir(orig)
-                          shutil.rmtree(item_path)
-
-              # 2. Gather all loose videos
-              all_videos = []
-              for r, _, files in os.walk(folder):
-                  for f in files:
-                      if f.lower().endswith(video_ext):
-                          all_videos.append(os.path.join(r, f))
-
-              all_videos = natsorted(all_videos)
-              series_regex = re.compile(r'(?i)(?:^(.*?)[.\s_-]+)?S(\d{1,2})(?:[EX\-]|\b)')
-              
-              series_groups = defaultdict(list)
-              movies_and_loose = []
-
-              for vid_path in all_videos:
-                  vid_name = os.path.basename(vid_path)
-                  parent_name = os.path.basename(os.path.dirname(vid_path))
-                  match = series_regex.search(vid_name) or series_regex.search(parent_name)
-                  
-                  if match:
-                      raw_title = match.group(1) or "Season"
-                      s_num = match.group(2)
-                      clean_title = re.sub(r'[^a-zA-Z0-9]', '', raw_title).lower()
-                      s_num_norm = str(int(s_num))
-                      group_key = f"{clean_title}_s{s_num_norm}"
-                      series_groups[group_key].append(vid_path)
-                  else:
-                      movies_and_loose.append(vid_path) # Movies / standalone files never zip
-
-              # 3. Process TV series groups
-              for group_key in natsorted(series_groups.keys()):
-                  vids = natsorted(series_groups[group_key])
-                  if len(vids) > 3:
-                      # Over 3 episodes -> Zip and name after the first episode
-                      first_stem = os.path.splitext(os.path.basename(vids[0]))[0]
-                      create_7z_group(first_stem, vids, folder, max_bytes)
-                  else:
-                      # 3 or fewer episodes -> Leave loose, upload as is
-                      movies_and_loose.extend(vids)
-
-              # 4. Flatten loose files/subtitles into root downloads folder and cleanup empty dirs
+              # Flatten all loose files and subtitles into root downloads folder and cleanup empty dirs
               for r, dirs, files in os.walk(folder, topdown=False):
                   if r == folder: continue
                   for f in natsorted(files):
