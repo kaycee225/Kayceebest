@@ -482,7 +482,7 @@ blocks:
                   shutil.rmtree(r, ignore_errors=True)
               EOF
 
-        - echo "📤 Running Parallel Multi-Threaded Uploads to Vikingfile..."
+            - echo "📤 Running Parallel Multi-Threaded Uploads to Vikingfile..."
             - |
               python3 - << 'EOF'
               import os
