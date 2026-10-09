@@ -511,71 +511,102 @@ blocks:
 
               threading.Thread(target=check_kill_switch, daemon=True).start()
 
-              # Query active backend storage node endpoint directly to bypass frontend Nginx body limit (413 Request Entity Too Large)
-              try:
-                  srv_res = requests.get("https://vikingfile.com/api/servers", timeout=10).json()
-                  SERVER = srv_res['data']['server']
-                  UPLOAD_URL = f"{SERVER}/upload.php"
-              except Exception:
+              def get_vikingfile_upload_urls():
+                  candidates = []
+                  # Query Vikingfile API v2 file upload node endpoint
                   try:
-                      srv_res = requests.get("https://vikingfile.com/api/upload/server", timeout=10).json()
-                      SERVER = srv_res['data']['server'] if 'data' in srv_res and 'server' in srv_res['data'] else srv_res['server']
-                      UPLOAD_URL = f"{SERVER}/upload.php" if not SERVER.endswith('/upload.php') else SERVER
-                  except Exception as e:
-                      print(f"Failed to fetch Vikingfile active server node, falling back to direct API: {e}")
-                      UPLOAD_URL = "https://vikingfile.com/api/upload"
+                      r = requests.get(f"https://vikingfile.com/api/v2/file/upload?key={VIKINGFILE_API_TOKEN}", timeout=10).json()
+                      if isinstance(r, dict):
+                          url = r.get('data', {}).get('upload_url') or r.get('upload_url') or r.get('result', {}).get('endpoint')
+                          if url:
+                              candidates.append(url)
+                  except Exception:
+                      pass
+
+                  # Query Vikingfile API server endpoints
+                  for ep in ["https://vikingfile.com/api/upload/server", "https://vikingfile.com/api/servers"]:
+                      try:
+                          r = requests.get(f"{ep}?key={VIKINGFILE_API_TOKEN}", timeout=10).json()
+                          if isinstance(r, dict):
+                              srv = r.get('data', {}).get('server') or r.get('server')
+                              if srv:
+                                  candidates.append(f"{srv.rstrip('/')}/upload.php")
+                      except Exception:
+                          pass
+
+                  # Direct backend storage node endpoints to bypass Nginx client_max_body_size limits on main frontend domain
+                  known_nodes = [
+                      "https://s1.vikingfile.com/upload.php",
+                      "https://fs1.vikingfile.com/upload.php",
+                      "https://upload.vikingfile.com/upload.php",
+                      "https://vikingfile.com/api/v2/file/upload",
+                      "https://vikingfile.com/api/upload"
+                  ]
+                  for node in known_nodes:
+                      if node not in candidates:
+                          candidates.append(node)
+                          
+                  return candidates
+
+              UPLOAD_URLS = get_vikingfile_upload_urls()
 
               def upload_single_file(file_path):
-                  # Filename and paths are used as-is without any sanitization or alterations
+                  # Filename and path are used as-is, preserving spaces and special characters without any modification
                   filename = os.path.basename(file_path)
                   file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
                   print(f"⬆️ [START] Uploading to Vikingfile: {filename} ({file_size_mb:.2f} MB)", flush=True)
                   
-                  # Array list in subprocess passes spaces and special characters natively via system call, completely preserving raw filenames
-                  curl_cmd = [
-                      "curl", "-X", "POST",
-                      UPLOAD_URL,
-                      "-H", f"Authorization: Bearer {VIKINGFILE_API_TOKEN}",
-                      "-F", f"file=@{file_path}",
-                      "--max-time", "3600"
-                  ]
-                  
-                  proc = subprocess.Popen(curl_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                  
-                  fd = proc.stderr.fileno()
-                  fl = fcntl.fcntl(fd, fcntl.F_GETFL)
-                  fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
-                  
-                  last_print_time = time.time()
-                  buffer = b""
-                  
-                  while proc.poll() is None:
-                      try:
-                          chunk = proc.stderr.read(1024)
-                          if chunk:
-                              buffer += chunk
-                              if b'\r' in buffer or b'\n' in buffer:
-                                  lines = buffer.replace(b'\r', b'\n').split(b'\n')
-                                  buffer = lines[-1]
-                                  valid_lines = [L.decode('utf-8', errors='ignore').strip() for L in lines[:-1] if L.strip()]
-                                  if valid_lines:
-                                      last_line = valid_lines[-1]
-                                      if time.time() - last_print_time >= 30:
-                                          print(f"📤 Progress [{filename[:25]}]: {last_line}", flush=True)
-                                          last_print_time = time.time()
-                      except Exception:
-                          pass
-                      time.sleep(0.5)
+                  for target_url in UPLOAD_URLS:
+                      # Passing array directly into subprocess ensures filenames with spaces, quotes, and special characters pass without shell sanitization or corruption
+                      curl_cmd = [
+                          "curl", "-X", "POST",
+                          target_url,
+                          "-H", f"Authorization: Bearer {VIKINGFILE_API_TOKEN}",
+                          "-F", f"key={VIKINGFILE_API_TOKEN}",
+                          "-F", f"api_key={VIKINGFILE_API_TOKEN}",
+                          "-F", f"file=@{file_path}",
+                          "--max-time", "3600"
+                      ]
                       
-                  stdout, stderr = proc.communicate()
-                  out_msg = stdout.decode('utf-8', errors='ignore').strip()
-                  err_msg = stderr.decode('utf-8', errors='ignore').strip() if stderr else 'Unknown error'
-                  
-                  # Fact-check response body to ensure HTTP 413 or HTML errors are caught and correctly flagged as failures
-                  if proc.returncode == 0 and "413 Request Entity Too Large" not in out_msg and not out_msg.startswith("<html"):
-                      print(f"✅ Finished uploading {filename}: {out_msg}", flush=True)
-                  else:
-                      print(f"❌ Upload Error for {filename}: {out_msg if out_msg else err_msg}", flush=True)
+                      proc = subprocess.Popen(curl_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                      
+                      fd = proc.stderr.fileno()
+                      fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+                      fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+                      
+                      last_print_time = time.time()
+                      buffer = b""
+                      
+                      while proc.poll() is None:
+                          try:
+                              chunk = proc.stderr.read(1024)
+                              if chunk:
+                                  buffer += chunk
+                                  if b'\r' in buffer or b'\n' in buffer:
+                                      lines = buffer.replace(b'\r', b'\n').split(b'\n')
+                                      buffer = lines[-1]
+                                      valid_lines = [L.decode('utf-8', errors='ignore').strip() for L in lines[:-1] if L.strip()]
+                                      if valid_lines:
+                                          last_line = valid_lines[-1]
+                                          if time.time() - last_print_time >= 30:
+                                              print(f"📤 Progress [{filename[:25]}]: {last_line}", flush=True)
+                                              last_print_time = time.time()
+                          except Exception:
+                              pass
+                          time.sleep(0.5)
+                          
+                      stdout, stderr = proc.communicate()
+                      out_msg = stdout.decode('utf-8', errors='ignore').strip()
+                      err_msg = stderr.decode('utf-8', errors='ignore').strip() if stderr else 'Unknown error'
+                      
+                      # Fact-check response body to ensure HTTP 413 or HTML errors trigger fallback to the next node
+                      if proc.returncode == 0 and "413 Request Entity Too Large" not in out_msg and not out_msg.startswith("<html"):
+                          print(f"✅ Finished uploading {filename}: {out_msg}", flush=True)
+                          return
+                      else:
+                          print(f"⚠️ Upload node {target_url} returned error for {filename}: {out_msg if out_msg else err_msg}. Trying next endpoint...", flush=True)
+
+                  print(f"❌ Failed to upload {filename} on all Vikingfile endpoints.", flush=True)
 
               if os.path.exists(FOLDER_PATH):
                   upload_queue = []
