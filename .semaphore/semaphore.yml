@@ -495,7 +495,6 @@ blocks:
               from natsort import natsorted
 
               VIKINGFILE_API_TOKEN = '8IcySE8jai'
-              UPLOAD_URL = 'https://vikingfile.com/api/upload'
               FOLDER_PATH = 'downloads'
               LINK_URL = "https://utfdtjcnbprlhkhsdovt.supabase.co/functions/v1/download-page/354dcb17-48af-495d-b98f-c9c1bd268c33"
 
@@ -512,13 +511,27 @@ blocks:
 
               threading.Thread(target=check_kill_switch, daemon=True).start()
 
+              # Query active backend storage node endpoint directly to bypass frontend Nginx body limit (413 Request Entity Too Large)
+              try:
+                  srv_res = requests.get("https://vikingfile.com/api/servers", timeout=10).json()
+                  SERVER = srv_res['data']['server']
+                  UPLOAD_URL = f"{SERVER}/upload.php"
+              except Exception:
+                  try:
+                      srv_res = requests.get("https://vikingfile.com/api/upload/server", timeout=10).json()
+                      SERVER = srv_res['data']['server'] if 'data' in srv_res and 'server' in srv_res['data'] else srv_res['server']
+                      UPLOAD_URL = f"{SERVER}/upload.php" if not SERVER.endswith('/upload.php') else SERVER
+                  except Exception as e:
+                      print(f"Failed to fetch Vikingfile active server node, falling back to direct API: {e}")
+                      UPLOAD_URL = "https://vikingfile.com/api/upload"
+
               def upload_single_file(file_path):
+                  # Filename and paths are used as-is without any sanitization or alterations
                   filename = os.path.basename(file_path)
                   file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
                   print(f"⬆️ [START] Uploading to Vikingfile: {filename} ({file_size_mb:.2f} MB)", flush=True)
                   
-                  # Array-based subprocess invocation bypasses shell parsing completely.
-                  # Spaces, quotes, and special characters in filenames pass verbatim without sanitization.
+                  # Array list in subprocess passes spaces and special characters natively via system call, completely preserving raw filenames
                   curl_cmd = [
                       "curl", "-X", "POST",
                       UPLOAD_URL,
@@ -555,11 +568,14 @@ blocks:
                       time.sleep(0.5)
                       
                   stdout, stderr = proc.communicate()
-                  if proc.returncode == 0:
-                      print(f"✅ Finished uploading {filename}: {stdout.decode('utf-8', errors='ignore').strip()}", flush=True)
+                  out_msg = stdout.decode('utf-8', errors='ignore').strip()
+                  err_msg = stderr.decode('utf-8', errors='ignore').strip() if stderr else 'Unknown error'
+                  
+                  # Fact-check response body to ensure HTTP 413 or HTML errors are caught and correctly flagged as failures
+                  if proc.returncode == 0 and "413 Request Entity Too Large" not in out_msg and not out_msg.startswith("<html"):
+                      print(f"✅ Finished uploading {filename}: {out_msg}", flush=True)
                   else:
-                      err_msg = stderr.decode('utf-8', errors='ignore').strip() if stderr else 'Unknown error'
-                      print(f"❌ Curl Error uploading {filename}: {err_msg}", flush=True)
+                      print(f"❌ Upload Error for {filename}: {out_msg if out_msg else err_msg}", flush=True)
 
               if os.path.exists(FOLDER_PATH):
                   upload_queue = []
