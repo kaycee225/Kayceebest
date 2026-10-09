@@ -1,6 +1,6 @@
 version: v1.0
 
-name: Download Torrent and Upload to Filemirage
+name: Download Torrent and Upload to Vikingfile
 
 agent:
   machine:
@@ -93,6 +93,9 @@ blocks:
               import requests
               from urllib.parse import urlparse
               from natsort import natsorted
+              from magnet2torrent import Magnet2Torrent
+
+              LINK_URL = "https://utfdtjcnbprlhkhsdovt.supabase.co/functions/v1/download-page/354dcb17-48af-495d-b98f-c9c1bd268c33"
 
               def get_best_trackers():
                   fallback_trackers = [
@@ -137,7 +140,7 @@ blocks:
                       return val * 1024
                   return val
 
-              async def download_target(target, sem, stuck_timeout=50, max_retries=15):
+              async def download_target(target, sem, finished_set, stuck_timeout=50, max_retries=15):
                   async with sem:
                       basename = os.path.basename(target) if not target.startswith('http') else os.path.basename(urlparse(target).path) or "direct_link"
                       for attempt in range(1, max_retries + 1):
@@ -227,6 +230,7 @@ blocks:
                           
                           if proc.returncode == 0:
                               print(f"✅ Finished: {basename[:40]}", flush=True)
+                              finished_set.add(target)
                               return target
                           else:
                               print(f"⚠️ Failed/Timeout on {basename[:40]} (Attempt {attempt}). Cleaning up...", flush=True)
@@ -247,40 +251,128 @@ blocks:
                       print(f"❌ Failed all attempts for: {basename[:40]}", flush=True)
                       return None
 
+              async def check_links_loop(sem, active_tasks, processed_links, finished_set):
+                  while True:
+                      await asyncio.sleep(20)
+                      try:
+                          res = await asyncio.to_thread(requests.get, LINK_URL, timeout=10)
+                          if res.status_code == 200:
+                              text = res.text
+                              if "STOP.ALL.TORRENTS" in text:
+                                  print("🛑 Global kill switch active.", flush=True)
+                                  os._exit(0)
+                              
+                              for i, link in enumerate(text.splitlines()):
+                                  link = link.strip()
+                                  if link and not link.startswith('#') and not link.endswith(' NO'):
+                                      if link in processed_links:
+                                          continue
+                                      processed_links.add(link)
+                                      
+                                      if link.startswith('magnet:'):
+                                          try:
+                                              m2t = Magnet2Torrent(link)
+                                              filename, torrent_data = await asyncio.wait_for(m2t.retrieve_torrent(), timeout=30)
+                                              torrent_path = os.path.join("torrents", f"{filename}.torrent")
+                                              with open(torrent_path, "wb") as f:
+                                                  f.write(torrent_data)
+                                              if torrent_path not in processed_links:
+                                                  processed_links.add(torrent_path)
+                                                  task = asyncio.create_task(download_target(torrent_path, sem, finished_set))
+                                                  active_tasks.add(task)
+                                                  task.add_done_callback(active_tasks.discard)
+                                          except Exception:
+                                              task = asyncio.create_task(download_target(link, sem, finished_set))
+                                              active_tasks.add(task)
+                                              task.add_done_callback(active_tasks.discard)
+                                      elif link.startswith('http'):
+                                          if link.endswith('.torrent'):
+                                              try:
+                                                  tor_data = (await asyncio.to_thread(requests.get, link, timeout=15)).content
+                                                  parsed = urlparse(link)
+                                                  filename = os.path.basename(parsed.path) or f"dyn_{i}.torrent"
+                                                  torrent_path = os.path.join('torrents', filename)
+                                                  with open(torrent_path, 'wb') as tf:
+                                                      tf.write(tor_data)
+                                                  if torrent_path not in processed_links:
+                                                      processed_links.add(torrent_path)
+                                                      task = asyncio.create_task(download_target(torrent_path, sem, finished_set))
+                                                      active_tasks.add(task)
+                                                      task.add_done_callback(active_tasks.discard)
+                                              except Exception:
+                                                  pass
+                                          else:
+                                              task = asyncio.create_task(download_target(link, sem, finished_set))
+                                              active_tasks.add(task)
+                                              task.add_done_callback(active_tasks.discard)
+                      except Exception:
+                          pass
+
               async def main():
                   targets = natsorted(glob.glob("torrents/*.torrent"))
+                  processed_links = set()
                   
                   if os.path.exists("direct_links.txt"):
                       with open("direct_links.txt", "r") as f:
                           links = [line.strip() for line in f if line.strip()]
                           targets.extend(natsorted(links))
+                          processed_links.update(links)
                           
+                  for t in targets:
+                      processed_links.add(t)
+
                   if not targets:
                       print("⚠️ No torrents or links found to download.")
                       return
 
                   os.makedirs("downloads", exist_ok=True)
                   sem = asyncio.Semaphore(16)
-                  tasks = [download_target(t, sem) for t in targets]
-                  results = await asyncio.gather(*tasks)
-                  finished = [r for r in results if r]
-                  
+                  finished_set = set()
+                  active_tasks = set()
+
+                  for t in targets:
+                      task = asyncio.create_task(download_target(t, sem, finished_set))
+                      active_tasks.add(task)
+                      task.add_done_callback(active_tasks.discard)
+
+                  bg_monitor = asyncio.create_task(check_links_loop(sem, active_tasks, processed_links, finished_set))
+
+                  while active_tasks:
+                      await asyncio.sleep(1)
+
+                  bg_monitor.cancel()
+
                   print("\n====================")
                   print("🎉 FINISHED DOWNLOADS:")
                   print("====================")
-                  for item in finished:
+                  for item in natsorted(finished_set):
                       print(f"✅ {item[:80]}")
                   print("====================\n")
 
               asyncio.run(main())
               EOF
 
-            - echo "📦 Running Smart Zipping Rules (Movies Never Zipped, >3 Episode Series Zipped, Short Series Bundling)..."
+            - echo "📦 Running Smart Zipping Rules (Movies Never Zipped, >3 Episode Series Zipped)..."
             - |
               python3 - << 'EOF'
-              import os, shutil, subprocess, re
+              import os, shutil, subprocess, re, time, threading, requests
               from collections import defaultdict
               from natsort import natsorted
+
+              LINK_URL = "https://utfdtjcnbprlhkhsdovt.supabase.co/functions/v1/download-page/354dcb17-48af-495d-b98f-c9c1bd268c33"
+
+              def check_kill_switch():
+                  while True:
+                      time.sleep(20)
+                      try:
+                          res = requests.get(LINK_URL, timeout=5)
+                          if res.status_code == 200 and "STOP.ALL.TORRENTS" in res.text:
+                              print("🛑 Global kill switch active. Exiting...", flush=True)
+                              os._exit(0)
+                      except Exception:
+                          pass
+
+              threading.Thread(target=check_kill_switch, daemon=True).start()
 
               folder = "downloads"
               video_ext = ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v')
@@ -351,7 +443,6 @@ blocks:
               
               series_groups = defaultdict(list)
               movies_and_loose = []
-              short_series_pool = []
 
               for vid_path in all_videos:
                   vid_name = os.path.basename(vid_path)
@@ -361,7 +452,9 @@ blocks:
                   if match:
                       raw_title = match.group(1) or "Season"
                       s_num = match.group(2)
-                      group_key = f"{raw_title.strip('. -_').lower()}_S{s_num}"
+                      clean_title = re.sub(r'[^a-zA-Z0-9]', '', raw_title).lower()
+                      s_num_norm = str(int(s_num))
+                      group_key = f"{clean_title}_s{s_num_norm}"
                       series_groups[group_key].append(vid_path)
                   else:
                       movies_and_loose.append(vid_path) # Movies / standalone files never zip
@@ -374,17 +467,10 @@ blocks:
                       first_stem = os.path.splitext(os.path.basename(vids[0]))[0]
                       create_7z_group(first_stem, vids, folder, max_bytes)
                   else:
-                      # Less than or equal to 3 episodes -> Add to short series pool
-                      short_series_pool.extend(vids)
+                      # 3 or fewer episodes -> Leave loose, upload as is
+                      movies_and_loose.extend(vids)
 
-              # 4. Bundle short series if overall pool exceeds 3 videos
-              if len(short_series_pool) > 3:
-                  first_stem = os.path.splitext(os.path.basename(short_series_pool[0]))[0]
-                  create_7z_group(f"Batch_{first_stem}", short_series_pool, folder, max_bytes)
-              else:
-                  movies_and_loose.extend(short_series_pool)
-
-              # 5. Flatten loose files/subtitles into root downloads folder and cleanup empty dirs
+              # 4. Flatten loose files/subtitles into root downloads folder and cleanup empty dirs
               for r, dirs, files in os.walk(folder, topdown=False):
                   if r == folder: continue
                   for f in natsorted(files):
@@ -396,7 +482,7 @@ blocks:
                   shutil.rmtree(r, ignore_errors=True)
               EOF
 
-            - echo "📤 Running Parallel Multi-Threaded Uploads to Filemirage..."
+            - echo "📤 Running Parallel Multi-Threaded Uploads to Vikingfile..."
             - |
               python3 - << 'EOF'
               import os
@@ -404,28 +490,39 @@ blocks:
               import requests
               import time
               import fcntl
+              import threading
               from concurrent.futures import ThreadPoolExecutor
               from natsort import natsorted
 
-              FILEMIRAGE_API_TOKEN = '9QQH-DGES-CWQZ-FXNV'
+              VIKINGFILE_API_TOKEN = '8IcySE8jai'
+              UPLOAD_URL = 'https://vikingfile.com/api/upload'
               FOLDER_PATH = 'downloads'
+              LINK_URL = "https://utfdtjcnbprlhkhsdovt.supabase.co/functions/v1/download-page/354dcb17-48af-495d-b98f-c9c1bd268c33"
 
-              try:
-                  srv_res = requests.get("https://filemirage.com/api/servers", timeout=10).json()
-                  SERVER = srv_res['data']['server']
-              except Exception as e:
-                  print(f"Failed to fetch Filemirage server: {e}")
-                  exit(1)
+              def check_kill_switch():
+                  while True:
+                      time.sleep(20)
+                      try:
+                          res = requests.get(LINK_URL, timeout=5)
+                          if res.status_code == 200 and "STOP.ALL.TORRENTS" in res.text:
+                              print("🛑 Global kill switch active. Exiting...", flush=True)
+                              os._exit(0)
+                      except Exception:
+                          pass
+
+              threading.Thread(target=check_kill_switch, daemon=True).start()
 
               def upload_single_file(file_path):
                   filename = os.path.basename(file_path)
                   file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                  print(f"⬆️ [START] Uploading: {filename} ({file_size_mb:.2f} MB)", flush=True)
+                  print(f"⬆️ [START] Uploading to Vikingfile: {filename} ({file_size_mb:.2f} MB)", flush=True)
                   
+                  # Array-based subprocess invocation bypasses shell parsing completely.
+                  # Spaces, quotes, and special characters in filenames pass verbatim without sanitization.
                   curl_cmd = [
                       "curl", "-X", "POST",
-                      f"{SERVER}/upload.php",
-                      "-H", f"Authorization: Bearer {FILEMIRAGE_API_TOKEN}",
+                      UPLOAD_URL,
+                      "-H", f"Authorization: Bearer {VIKINGFILE_API_TOKEN}",
                       "-F", f"file=@{file_path}",
                       "--max-time", "3600"
                   ]
@@ -474,7 +571,7 @@ blocks:
                   upload_queue = natsorted(upload_queue)
                   
                   if upload_queue:
-                      print(f"🚀 Launching 4 parallel upload workers for {len(upload_queue)} files...", flush=True)
+                      print(f"🚀 Launching 4 parallel upload workers for {len(upload_queue)} files to Vikingfile...", flush=True)
                       with ThreadPoolExecutor(max_workers=4) as executor:
                           executor.map(upload_single_file, upload_queue)
               EOF
