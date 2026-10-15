@@ -387,72 +387,115 @@ blocks:
                   shutil.rmtree(r, ignore_errors=True)
               EOF
 
-              echo "📤 Running Parallel Multi-Threaded Uploads to Filemirage..."
-              /usr/bin/python3 -u - << 'EOF'
+           echo "📤 Running Parallel Multi-Threaded Uploads to Vikingfile..."
+            - |
+              python3 - << 'EOF'
               import os
               import subprocess
               import requests
               import time
               import fcntl
+              import threading
               from concurrent.futures import ThreadPoolExecutor
               from natsort import natsorted
 
-              FILEMIRAGE_API_TOKEN = '9QQH-DGES-CWQZ-FXNV'
+              VIKINGFILE_API_TOKEN = '8IcySE8jai'
               FOLDER_PATH = 'downloads'
+              LINK_URL = "https://utfdtjcnbprlhkhsdovt.supabase.co/functions/v1/download-page/354dcb17-48af-495d-b98f-c9c1bd268c33"
 
-              try:
-                  srv_res = requests.get("https://filemirage.com/api/servers", timeout=10).json()
-                  SERVER = srv_res['data']['server']
-              except Exception as e:
-                  print(f"Failed to fetch Filemirage server: {e}")
-                  exit(1)
+              def check_kill_switch():
+                  while True:
+                      time.sleep(20)
+                      try:
+                          res = requests.get(LINK_URL, timeout=5)
+                          if res.status_code == 200 and "STOP.ALL.TORRENTS" in res.text:
+                              print("🛑 Global kill switch active. Exiting...", flush=True)
+                              os._exit(0)
+                      except Exception:
+                          pass
+
+              threading.Thread(target=check_kill_switch, daemon=True).start()
+
+              def get_upload_server():
+                  # Ask the API for a fresh storage node every time (avoids frontend nginx 413 limit)
+                  r = requests.get("https://vikingfile.com/api/get-server", timeout=15).json()
+                  server = r.get("server")
+                  if not server:
+                      raise RuntimeError(f"No server in response: {r}")
+                  return server
+
+              def curl_quote(s):
+                  # Escape for curl's quoted -F value syntax so spaces ; , " \ ' etc. survive intact
+                  return s.replace("\\", "\\\\").replace('"', '\\"')
 
               def upload_single_file(file_path):
                   filename = os.path.basename(file_path)
                   file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                  print(f"⬆️ [START] Uploading: {filename} ({file_size_mb:.2f} MB)", flush=True)
-                  
-                  curl_cmd = [
-                      "curl", "-X", "POST",
-                      f"{SERVER}/upload.php",
-                      "-H", f"Authorization: Bearer {FILEMIRAGE_API_TOKEN}",
-                      "-F", f"file=@{file_path}",
-                      "--max-time", "3600"
-                  ]
-                  
-                  proc = subprocess.Popen(curl_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                  
-                  fd = proc.stderr.fileno()
-                  fl = fcntl.fcntl(fd, fcntl.F_GETFL)
-                  fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
-                  
-                  last_print_time = time.time()
-                  buffer = b""
-                  
-                  while proc.poll() is None:
+                  print(f"⬆️ [START] Uploading to Vikingfile: {filename} ({file_size_mb:.2f} MB)", flush=True)
+
+                  for attempt in range(1, 4):
                       try:
-                          chunk = proc.stderr.read(1024)
-                          if chunk:
-                              buffer += chunk
-                              if b'\r' in buffer or b'\n' in buffer:
-                                  lines = buffer.replace(b'\r', b'\n').split(b'\n')
-                                  buffer = lines[-1]
-                                  valid_lines = [L.decode('utf-8', errors='ignore').strip() for L in lines[:-1] if L.strip()]
-                                  if valid_lines:
-                                      last_line = valid_lines[-1]
-                                      if time.time() - last_print_time >= 30:
-                                          print(f"📤 Progress [{filename[:25]}]: {last_line}", flush=True)
+                          target_url = get_upload_server()
+                      except Exception as e:
+                          print(f"⚠️ get-server failed for {filename} (attempt {attempt}): {e}", flush=True)
+                          time.sleep(5)
+                          continue
+
+                      # List-form subprocess = no shell, so no shell quoting issues.
+                      # The quoted file=@"..." ;filename="..." form protects against curl's own -F parsing.
+                      curl_cmd = [
+                          "curl", "-f", "-X", "POST",
+                          target_url,
+                          "--form-string", f"user={VIKINGFILE_API_TOKEN}",
+                          "-F", f'file=@"{curl_quote(file_path)}";filename="{curl_quote(filename)}"',
+                          "--max-time", "3600"
+                      ]
+
+                      proc = subprocess.Popen(curl_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+                      fd = proc.stderr.fileno()
+                      fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+                      fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+
+                      last_print_time = time.time()
+                      buffer = b""
+
+                      while proc.poll() is None:
+                          try:
+                              chunk = proc.stderr.read(1024)
+                              if chunk:
+                                  buffer += chunk
+                                  if b'\r' in buffer or b'\n' in buffer:
+                                      lines = buffer.replace(b'\r', b'\n').split(b'\n')
+                                      buffer = lines[-1]
+                                      valid_lines = [L.decode('utf-8', errors='ignore').strip() for L in lines[:-1] if L.strip()]
+                                      if valid_lines and time.time() - last_print_time >= 30:
+                                          print(f"📤 Progress [{filename[:25]}]: {valid_lines[-1]}", flush=True)
                                           last_print_time = time.time()
-                      except Exception:
-                          pass
-                      time.sleep(0.5)
-                      
-                  stdout, stderr = proc.communicate()
-                  if proc.returncode == 0:
-                      print(f"✅ Finished uploading {filename}: {stdout.decode('utf-8', errors='ignore').strip()}", flush=True)
-                  else:
-                      err_msg = stderr.decode('utf-8', errors='ignore').strip() if stderr else 'Unknown error'
-                      print(f"❌ Curl Error uploading {filename}: {err_msg}", flush=True)
+                          except Exception:
+                              pass
+                          time.sleep(0.5)
+
+                      stdout, stderr = proc.communicate()
+                      out_msg = stdout.decode('utf-8', errors='ignore').strip()
+                      err_msg = stderr.decode('utf-8', errors='ignore').strip().splitlines()
+                      err_tail = err_msg[-1] if err_msg else 'Unknown error'
+
+                      # -f makes curl exit non-zero on HTTP 4xx/5xx (including 413)
+                      if proc.returncode == 0 and out_msg and not out_msg.lower().startswith("<html"):
+                          print(f"✅ Finished uploading {filename}: {out_msg}", flush=True)
+                          return
+
+                      print(f"⚠️ Attempt {attempt}/3 failed for {filename} via {target_url}: {out_msg or err_tail}", flush=True)
+                      time.sleep(3)
+
+                  print(f"❌ Failed to upload {filename} after 3 attempts.", flush=True)
+
+              def safe_upload(file_path):
+                  try:
+                      upload_single_file(file_path)
+                  except Exception as e:
+                      print(f"❌ Exception uploading {file_path}: {e}", flush=True)
 
               if os.path.exists(FOLDER_PATH):
                   upload_queue = []
@@ -460,11 +503,11 @@ blocks:
                       for filename in files:
                           if not any(ext in filename for ext in [".!qB", ".part", ".aria2"]):
                               upload_queue.append(os.path.join(root, filename))
-                  
+
                   upload_queue = natsorted(upload_queue)
-                  
+
                   if upload_queue:
-                      print(f"🚀 Launching 4 parallel upload workers for {len(upload_queue)} files...", flush=True)
+                      print(f"🚀 Launching 4 parallel upload workers for {len(upload_queue)} files to Vikingfile...", flush=True)
                       with ThreadPoolExecutor(max_workers=4) as executor:
-                          executor.map(upload_single_file, upload_queue)
+                          list(executor.map(safe_upload, upload_queue))
               EOF
